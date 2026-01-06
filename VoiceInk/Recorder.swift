@@ -37,7 +37,7 @@ class Recorder: NSObject, ObservableObject {
     
     private func handleDeviceChange() async {
         guard !isReconfiguring else { return }
-        guard recorder != nil else { return }
+        guard recorder?.isCurrentlyRecording == true else { return }
         
         isReconfiguring = true
         
@@ -51,10 +51,15 @@ class Recorder: NSObject, ObservableObject {
     }
     
     private func configureAudioSession(with deviceID: AudioDeviceID) async throws {
+        if let currentDefault = AudioDeviceConfiguration.getDefaultInputDevice(),
+           currentDefault == deviceID {
+            return
+        }
         try AudioDeviceConfiguration.setDefaultInputDevice(deviceID)
     }
     
     func startRecording(toOutputFile url: URL) async throws {
+        let startTime = DispatchTime.now()
         deviceManager.isRecordingActive = true
         
         let currentDeviceID = deviceManager.getCurrentDevice()
@@ -75,15 +80,22 @@ class Recorder: NSObject, ObservableObject {
         hasDetectedAudioInCurrentSession = false
 
         let deviceID = deviceManager.getCurrentDevice()
+        let configStart = DispatchTime.now()
         do {
             try await configureAudioSession(with: deviceID)
+            let configMs = (DispatchTime.now().uptimeNanoseconds - configStart.uptimeNanoseconds) / 1_000_000
+            logger.info("⏱️ Audio session config \(configMs, privacy: .public)ms")
         } catch {
             logger.warning("⚠️ Failed to configure audio session for device \(deviceID), attempting to continue: \(error.localizedDescription)")
         }
 
         do {
-            let engineRecorder = AudioEngineRecorder()
-            recorder = engineRecorder
+            if recorder == nil {
+                recorder = AudioEngineRecorder()
+            }
+            guard let engineRecorder = recorder else {
+                throw RecorderError.couldNotStartRecording
+            }
 
             // Set up error callback to handle runtime recording failures
             engineRecorder.onRecordingError = { [weak self] error in
@@ -92,9 +104,13 @@ class Recorder: NSObject, ObservableObject {
                 }
             }
 
+            let engineStart = DispatchTime.now()
             try engineRecorder.startRecording(toOutputFile: url)
+            let engineMs = (DispatchTime.now().uptimeNanoseconds - engineStart.uptimeNanoseconds) / 1_000_000
+            let totalMs = (DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000
 
             logger.info("✅ AudioEngineRecorder started successfully")
+            logger.info("⏱️ Audio engine start \(engineMs, privacy: .public)ms (total \(totalMs, privacy: .public)ms)")
 
             audioRestorationTask?.cancel()
             audioRestorationTask = nil
@@ -109,7 +125,7 @@ class Recorder: NSObject, ObservableObject {
             audioMeterUpdateTask?.cancel()
 
             audioMeterUpdateTask = Task {
-                while recorder != nil && !Task.isCancelled {
+                while recorder?.isCurrentlyRecording == true && !Task.isCancelled {
                     updateAudioMeter()
                     try? await Task.sleep(nanoseconds: 17_000_000)
                 }
@@ -147,7 +163,6 @@ class Recorder: NSObject, ObservableObject {
         audioLevelCheckTask?.cancel()
         audioMeterUpdateTask?.cancel()
         recorder?.stopRecording()
-        recorder = nil
         audioMeter = AudioMeter(averagePower: 0, peakPower: 0)
 
         audioRestorationTask = Task {

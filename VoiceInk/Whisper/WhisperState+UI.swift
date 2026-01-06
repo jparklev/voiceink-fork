@@ -40,13 +40,20 @@ extension WhisperState {
                 await cancelRecording()
             }
         } else {
+            // Play sound (returns immediately, plays in background)
             SoundManager.shared.playStartSound()
 
+            // Start recording engine in parallel with UI - don't await yet
+            // This allows engine initialization to overlap with UI animation
+            async let recordingStarted: () = toggleRecord(powerModeId: powerModeId)
+
+            // Show UI concurrently while recording engine is starting
             await MainActor.run {
                 isMiniRecorderVisible = true // This will call showRecorderPanel() via didSet
             }
 
-            await toggleRecord(powerModeId: powerModeId)
+            // Wait for recording to finish starting
+            await recordingStarted
         }
     }
     
@@ -116,6 +123,14 @@ extension WhisperState {
         NotificationCenter.default.addObserver(self, selector: #selector(handleDismissMiniRecorder), name: .dismissMiniRecorder, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(handleLicenseStatusChanged), name: .licenseStatusChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(handlePromptChange), name: .promptDidChange, object: nil)
+#if DEBUG
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleToggleMiniRecorder),
+            name: Notification.Name("com.prakashjoshipax.VoiceInk.toggleMiniRecorder"),
+            object: nil
+        )
+#endif
     }
     
     @objc public func handleToggleMiniRecorder() {
