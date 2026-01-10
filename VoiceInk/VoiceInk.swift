@@ -33,9 +33,6 @@ struct VoiceInkApp: App {
     @StateObject private var prewarmService: ModelPrewarmService
     
     init() {
-        // Configure FluidAudio logging subsystem
-        AppLogger.defaultSubsystem = "com.prakashjoshipax.voiceink.parakeet"
-
         if UserDefaults.standard.object(forKey: "powerModeUIFlag") == nil {
             let hasEnabledPowerModes = PowerModeManager.shared.configurations.contains { $0.isEnabled }
             UserDefaults.standard.set(hasEnabledPowerModes, forKey: "powerModeUIFlag")
@@ -226,7 +223,8 @@ struct VoiceInkApp: App {
                         // Migrate dictionary data from UserDefaults to SwiftData (one-time operation)
                         DictionaryMigrationService.shared.migrateIfNeeded(context: container.mainContext)
 
-                        updaterViewModel.silentlyCheckForUpdates()
+                        // Disabled for local fork - check upstream manually
+                        // updaterViewModel.silentlyCheckForUpdates()
                         if enableAnnouncements {
                             AnnouncementsService.shared.start()
                         }

@@ -447,15 +447,19 @@ class AudioDeviceManager: ObservableObject {
     private func handleDeviceListChange() {
         logger.info("Device list change detected")
 
-        // Don't change devices while recording is active
-        // This prevents audio engine errors during recording startup
-        if isRecordingActive {
-            logger.info("Recording is active - deferring device change handling")
-            return
-        }
+        // With pre-warmed engine architecture, device changes are handled by
+        // AVAudioEngineConfigurationChangeNotification in AudioEngineRecorder.
+        // We still update our device list but don't need to defer during recording.
 
         loadAvailableDevices { [weak self] in
             guard let self = self else { return }
+
+            // Only update device selection if not currently recording
+            // The engine handles reconfiguration automatically during recording
+            guard !self.isRecordingActive else {
+                self.logger.info("Recording active - device list updated, engine will auto-reconfigure")
+                return
+            }
 
             if self.inputMode == .prioritized {
                 self.selectHighestPriorityAvailableDevice()
