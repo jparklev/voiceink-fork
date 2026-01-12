@@ -128,6 +128,36 @@ class WhisperState: NSObject, ObservableObject {
         loadAvailableModels()
         loadCurrentTranscriptionModel()
         refreshAllAvailableModels()
+        cleanupOldVoiceInkTempFiles()
+
+        // Clean up expired agent sessions on launch
+        Task {
+            await AgentSessionManager.shared.cleanupExpiredSessions()
+        }
+    }
+
+    // MARK: - Temp File Cleanup
+    private func cleanupOldVoiceInkTempFiles(olderThan seconds: TimeInterval = 60 * 60 * 24) {
+        let tmp = FileManager.default.temporaryDirectory
+        let prefixes = ["voiceink_agent_prompt_", "voiceink_ghostty_"]
+
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: tmp,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let cutoff = Date().addingTimeInterval(-seconds)
+
+        for url in urls {
+            let name = url.lastPathComponent
+            guard prefixes.contains(where: name.hasPrefix) else { continue }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            if let m = values?.contentModificationDate, m < cutoff {
+                try? FileManager.default.removeItem(at: url)
+                logger.notice("Cleaned up old temp file: \(name)")
+            }
+        }
     }
     
     private func createRecordingsDirectoryIfNeeded() {
@@ -196,6 +226,11 @@ class WhisperState: NSObject, ObservableObject {
                             }
 
                             if let powerModeId = powerModeId {
+                                // Save current active config ID before switching using restore token
+                                let previousId = PowerModeManager.shared.currentActiveConfiguration?.id
+                                self.configRestoreToken = ConfigRestoreToken(previousConfigId: previousId, hadOverride: true)
+                                self.logger.notice("🔄 Saved config restore token, previous: \(String(describing: previousId))")
+
                                 await ActiveWindowService.shared.applyConfiguration(powerModeId: powerModeId)
                             } else {
                                 let hasActiveSession = await PowerModeSessionManager.shared.hasActiveSession
@@ -203,6 +238,7 @@ class WhisperState: NSObject, ObservableObject {
                                     await ActiveWindowService.shared.applyConfiguration()
                                 }
                             }
+
 
                             // Load model and capture context in background without blocking
                             Task.detached { [weak self] in
@@ -389,15 +425,38 @@ class WhisperState: NSObject, ObservableObject {
         if await checkCancellationAndCleanup() { return }
 
         if let textToPaste = finalPastedText, transcription.transcriptionStatus == TranscriptionStatus.completed.rawValue {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                CursorPaster.pasteAtCursor(textToPaste + " ")
+            let powerMode = PowerModeManager.shared
+            // Check if configuration is enabled before using it
+            let activeConfig = powerMode.currentActiveConfiguration
+            let outputAction = (activeConfig?.isEnabled == true) ? (activeConfig?.outputAction ?? .paste) : .paste
 
-                let powerMode = PowerModeManager.shared
-                if let activeConfig = powerMode.currentActiveConfiguration, activeConfig.isAutoSendEnabled {
-                    // Slight delay to ensure the paste operation completes
+            switch outputAction {
+            case .paste:
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    CursorPaster.pasteAtCursor(textToPaste + " ")
+                }
+
+            case .pasteAndSend:
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    CursorPaster.pasteAtCursor(textToPaste + " ")
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         CursorPaster.pressEnter()
                     }
+                }
+
+            case .command(let config):
+                logger.notice("🎯 Output action: command (\(config.name))")
+                let useScreenCapture = activeConfig?.useScreenCapture ?? false
+                await executeCommandAction(config: config, transcriptionText: textToPaste, useScreenCapture: useScreenCapture)
+            }
+
+            // Legacy fallback: if isAutoSendEnabled is set but outputAction is .paste
+            if case .paste = outputAction,
+               let activeConfig = powerMode.currentActiveConfiguration,
+               activeConfig.isAutoSendEnabled,
+               activeConfig.isEnabled {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    CursorPaster.pressEnter()
                 }
             }
         }
@@ -411,6 +470,346 @@ class WhisperState: NSObject, ObservableObject {
         await self.dismissMiniRecorder()
 
         shouldCancelRecording = false
+    }
+
+    // MARK: - Configuration Restore Token
+    private struct ConfigRestoreToken {
+        let previousConfigId: UUID?
+        let hadOverride: Bool
+    }
+    private var configRestoreToken: ConfigRestoreToken?
+
+    // MARK: - Shell Helpers
+    private func shellEscape(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func buildResolvedArgs(_ config: CommandConfig) -> [String] {
+        var args = config.arguments
+        if let model = config.model, !model.isEmpty {
+            args += ["--model", model]
+        }
+        return args
+    }
+
+    private func executeCommandAction(config: CommandConfig, transcriptionText: String, useScreenCapture: Bool) async {
+        logger.notice("🔄 executeCommandAction starting (agent mode)...")
+        recordingState = .busy
+
+        var inputText = transcriptionText
+
+        // Inject Agent Prompt if available from bundle
+        if let resourcePath = Bundle.main.path(forResource: "AgentPrompt", ofType: "md"),
+           let promptContent = try? String(contentsOfFile: resourcePath) {
+            inputText = promptContent + "\n\nUser Request:\n" + inputText
+        }
+
+        // Capture screen context if enabled
+        var screenshotPath: String?
+        var windowContext: String?
+        if useScreenCapture {
+            let result = await captureScreenContextWithDetails()
+            if let url = result.screenshotURL {
+                screenshotPath = url.path
+                var contextLines = ["\n\n## Screen Context"]
+                if let info = result.windowInfo {
+                    contextLines.append("- App: \(info.appName)")
+                    windowContext = "App: \(info.appName)"
+                    if let title = info.windowTitle {
+                        contextLines.append("- Window: \(title)")
+                        windowContext = (windowContext ?? "") + ", Window: \(title)"
+                    }
+                }
+                contextLines.append("- Screenshot: \(url.path)")
+                contextLines.append("- To view: `open \"\(url.path)\"`")
+                inputText += contextLines.joined(separator: "\n")
+            }
+        }
+
+        // Check for resumable session
+        // Disabled auto-resume in favor of interactive loop
+        // let resumableSessionId = await AgentSessionManager.shared.getResumableSession(for: config)
+        let resumableSessionId: String? = nil
+
+        // Log to Obsidian before launching
+        await ObsidianLogger.shared.logSession(
+            configName: config.name,
+            transcription: transcriptionText,
+            windowContext: windowContext,
+            screenshotPath: screenshotPath,
+            sessionId: resumableSessionId,
+            workingDirectory: config.workingDirectory
+        )
+
+        // Launch agent in Ghostty
+        await launchAgentInGhostty(config: config, prompt: inputText, resumeSessionId: resumableSessionId)
+
+        // Cleanup state
+        recordingState = .idle
+        await restoreConfigurationIfNeeded()
+    }
+
+    // MARK: - Screen Context Capture
+    private struct ScreenCaptureResult {
+        let screenshotURL: URL?
+        let windowInfo: WindowInfo?
+    }
+
+    private func captureScreenContextWithDetails() async -> ScreenCaptureResult {
+        let capturer = ScreenCaptureService()
+        let windowInfo = await getActiveWindowInfo()
+        let url = await capturer.captureActiveWindowToFile()
+        if let url = url {
+            logger.notice("📸 Screenshot captured: \(url.path)")
+        }
+        return ScreenCaptureResult(screenshotURL: url, windowInfo: windowInfo)
+    }
+
+    private struct WindowInfo {
+        let appName: String
+        let windowTitle: String?
+    }
+
+    private func getActiveWindowInfo() async -> WindowInfo? {
+        // Try to get info from aerospace
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/aerospace")
+        task.arguments = ["list-windows", "--focused", "--json"]
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+               let first = json.first,
+               let appName = first["app-name"] as? String {
+                let title = first["title"] as? String
+                return WindowInfo(appName: appName, windowTitle: title)
+            }
+        } catch {
+            logger.notice("Could not get window info from aerospace: \(error.localizedDescription)")
+        }
+
+        return nil
+    }
+
+    // MARK: - Ghostty Launch
+    private func launchAgentInGhostty(config: CommandConfig, prompt: String, resumeSessionId: String?) async {
+        // Write prompt to temp file
+        let promptFileURL = FileManager.default.temporaryDirectory.appendingPathComponent("voiceink_agent_prompt_\(UUID().uuidString).txt")
+
+        do {
+            try prompt.write(to: promptFileURL, atomically: true, encoding: .utf8)
+        } catch {
+            logger.error("Failed to write prompt file: \(error)")
+            await InsightPanelController.shared.showError("Failed to write prompt: \(error.localizedDescription)")
+            return
+        }
+
+        // Check prompt size for ARG_MAX safety
+        let promptSize = (try? FileManager.default.attributesOfItem(atPath: promptFileURL.path)[.size] as? Int) ?? 0
+        if promptSize > 200_000 {
+            logger.warning("Prompt size \(promptSize) bytes exceeds safe limit for argv")
+        }
+
+        guard let ghosttyAppUrl = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty"),
+              let bundle = Bundle(url: ghosttyAppUrl),
+              let executableURL = bundle.executableURL else {
+            logger.error("Ghostty not found")
+            await InsightPanelController.shared.showError("Ghostty not installed")
+            return
+        }
+
+        // Build the shell command with proper escaping
+        let wdEsc = shellEscape(config.workingDirectory)
+        let exeEsc = shellEscape(config.executable)
+        let promptPathEsc = shellEscape(promptFileURL.path)
+        let baseName = shellEscape((config.executable as NSString).lastPathComponent)
+
+        // Build resolved arguments (includes --model if specified)
+        var resolvedArgs = buildResolvedArgs(config)
+
+        // Generate a new session ID for Claude to ensure we control sessions
+        let newSessionId = UUID().uuidString.lowercased()
+
+        // For Claude, add --session-id to control session explicitly
+        let isClaude = config.executable.contains("claude") || config.name.lowercased().contains("claude")
+        if isClaude && resumeSessionId == nil {
+            resolvedArgs += ["--session-id", newSessionId]
+        }
+
+        let resolvedArgsEsc = resolvedArgs.map(shellEscape).joined(separator: " ")
+
+        // Extract just the user's request (after "User Request:\n" if present) for display
+        let userRequest: String
+        if let range = prompt.range(of: "User Request:\n") {
+            userRequest = String(prompt[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            userRequest = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Truncate for display (first 500 chars)
+        let displayPrompt = userRequest.count > 500 ? String(userRequest.prefix(500)) + "..." : userRequest
+
+        // Build the command string
+        var bashCommand: String
+
+        if let sessionId = resumeSessionId, let resumeSpec = config.resumeSpec {
+            // Resume existing session
+            let resumeArgs = resumeSpec.buildArguments(sessionId: sessionId).map(shellEscape).joined(separator: " ")
+            let resumeExeEsc = shellEscape(resumeSpec.executable)
+
+            bashCommand = """
+            set -e
+            cd \(wdEsc) || exit 1
+
+            EXE=\(resumeExeEsc)
+            if [ ! -x "$EXE" ]; then
+                base=\(shellEscape((resumeSpec.executable as NSString).lastPathComponent))
+                EXE="$(command -v "$base" 2>/dev/null || true)"
+            fi
+
+            if [ -z "$EXE" ] || [ ! -x "$EXE" ]; then
+                echo "❌ Could not find executable for resume"
+                read -p "Press Enter to close..."
+                exit 1
+            fi
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔄 Resuming session: \(sessionId)"
+            echo "📂 Working Directory: $(pwd)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            "$EXE" \(resumeArgs)
+
+            echo ""
+            echo "✅ Session ended."
+            read -p "Press Enter to close..."
+            """
+
+            logger.notice("🔄 Resuming session \(sessionId) for \(config.name)")
+
+            // Update the stored session timestamp
+            await AgentSessionManager.shared.storeSession(sessionId: sessionId, for: config)
+        } else {
+            // New session - show the user's prompt
+            let promptDisplay = displayPrompt.replacingOccurrences(of: "'", with: "'\\''")
+
+            bashCommand = """
+            set -e
+            cd \(wdEsc) || exit 1
+
+            EXE=\(exeEsc)
+            if [ ! -x "$EXE" ]; then
+                base=\(baseName)
+                EXE="$(command -v "$base" 2>/dev/null || true)"
+            fi
+
+            if [ -z "$EXE" ] || [ ! -x "$EXE" ]; then
+                echo "❌ Could not find executable: \(config.executable)"
+                read -p "Press Enter to close..."
+                exit 1
+            fi
+            
+            SESSION_ID="\(newSessionId)"
+            FIRST_RUN=true
+            
+            while true; do
+                if [ "$FIRST_RUN" = "true" ]; then
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🎤 Your request:"
+                    echo '\(promptDisplay)'
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📂 Working Directory: $(pwd)"
+                    echo "🆔 Session ID: $SESSION_ID"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+
+                    size=$(wc -c < \(promptPathEsc) | tr -d ' ')
+                    if [ "$size" -gt 200000 ]; then
+                        echo "⚠️ Prompt too large ($size bytes), opening in editor"
+                        ${EDITOR:-vi} \(promptPathEsc)
+                    else
+                        "$EXE" \(resolvedArgsEsc) "$(cat \(promptPathEsc))"
+                    fi
+                    FIRST_RUN=false
+                else
+                    echo ""
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🔄 Resuming session: $SESSION_ID"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    "$EXE" --resume "$SESSION_ID"
+                fi
+
+                echo ""
+                echo "Session ended."
+                # Read single character, silent, prompt user
+                read -n 1 -p "Press Enter to close, or 'c' to continue session... " key
+                echo ""
+                
+                # Check for 'c' or 'C'
+                if [[ "$key" != "c" && "$key" != "C" ]]; then
+                    break
+                fi
+            done
+            """
+
+            logger.notice("🚀 Starting new session \(newSessionId) for \(config.name)")
+
+            // Store the session ID for future resume (optional, but good for history)
+            if isClaude {
+                await AgentSessionManager.shared.storeSession(sessionId: newSessionId, for: config)
+            }
+        }
+
+        // Create Ghostty config
+        let ghosttyConfigURL = FileManager.default.temporaryDirectory.appendingPathComponent("voiceink_ghostty_\(UUID().uuidString).config")
+        let ghosttyConfig = """
+        window-width = 120
+        window-height = 40
+        window-padding-x = 10
+        window-padding-y = 10
+        title = VoiceInk Agent - \(config.name)
+        window-decoration = false
+        """
+        try? ghosttyConfig.write(to: ghosttyConfigURL, atomically: true, encoding: .utf8)
+
+        // Launch Ghostty
+        let task = Process()
+        task.executableURL = executableURL
+        task.arguments = [
+            "--config-file=\(ghosttyConfigURL.path)",
+            "-e", "bash", "-lc", bashCommand
+        ]
+
+        do {
+            try task.run()
+            logger.notice("🚀 Launched Ghostty for \(config.name)")
+        } catch {
+            logger.error("Failed to launch Ghostty: \(error)")
+            await InsightPanelController.shared.showError("Failed to launch terminal: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Configuration Restore
+    private func restoreConfigurationIfNeeded() async {
+        guard let token = configRestoreToken, token.hadOverride else { return }
+
+        await MainActor.run {
+            if let prevId = token.previousConfigId,
+               let cfg = PowerModeManager.shared.getConfiguration(with: prevId) {
+                PowerModeManager.shared.setActiveConfiguration(cfg)
+                logger.notice("↩️ Restored previous configuration: \(cfg.name)")
+            } else {
+                PowerModeManager.shared.setActiveConfiguration(nil)
+                logger.notice("↩️ Restored previous configuration: None (Default)")
+            }
+        }
+        configRestoreToken = nil
     }
 
     func getEnhancementService() -> AIEnhancementService? {

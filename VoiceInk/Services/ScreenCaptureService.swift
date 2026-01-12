@@ -178,4 +178,25 @@ class ScreenCaptureService: ObservableObject {
         logger.notice("📸 Window capture failed")
         return nil
     }
-} 
+    func captureActiveWindowToFile() async -> URL? {
+        guard let image = await captureActiveWindow() else { return nil }
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent("voiceink_screenshot_\(UUID().uuidString).png")
+        
+        guard let tiffRepresentation = image.tiffRepresentation,
+              let bitmapImage = NSBitmapImageRep(data: tiffRepresentation),
+              let pngData = bitmapImage.representation(using: .png, properties: [:]) else {
+            return nil
+        }
+        
+        do {
+            try pngData.write(to: fileURL)
+            return fileURL
+        } catch {
+            logger.error("Failed to write screenshot to file: \(error.localizedDescription)")
+            return nil
+        }
+    }
+}
+ 

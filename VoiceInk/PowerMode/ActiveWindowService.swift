@@ -69,6 +69,14 @@ class ActiveWindowService: ObservableObject {
                 PowerModeManager.shared.setActiveConfiguration(config)
             }
             await PowerModeSessionManager.shared.beginSession(with: config)
+        } else {
+            // If no config matches (and no default), ensuring we clear any stale active configuration
+            await MainActor.run {
+                if PowerModeManager.shared.currentActiveConfiguration != nil {
+                     PowerModeManager.shared.setActiveConfiguration(nil)
+                     // logger.notice("∅ Cleared active configuration (no match found)")
+                }
+            }
         }
     }
 } 

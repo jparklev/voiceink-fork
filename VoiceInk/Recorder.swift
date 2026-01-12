@@ -173,28 +173,6 @@ class Recorder: NSObject, ObservableObject {
                 }
             }
 
-            audioLevelCheckTask = Task { [weak self] in
-                guard let self = self else { return }
-                let notificationChecks: [TimeInterval] = [5.0, 12.0]
-
-                for delay in notificationChecks {
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-
-                    if Task.isCancelled { return }
-
-                    if self.hasDetectedAudioInCurrentSession {
-                        return
-                    }
-
-                    await MainActor.run {
-                        NotificationManager.shared.showNotification(
-                            title: "No Audio Detected",
-                            type: .warning
-                        )
-                    }
-                }
-            }
-
         } catch {
             logger.error("Failed to start recording: \(error.localizedDescription)")
             stopRecording()

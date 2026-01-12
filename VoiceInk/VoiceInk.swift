@@ -38,6 +38,9 @@ struct VoiceInkApp: App {
             UserDefaults.standard.set(hasEnabledPowerModes, forKey: "powerModeUIFlag")
         }
 
+        // Create Gemini Agent PowerMode for testing voice-to-agent feature
+        PowerModeManager.shared.createGeminiAgentPowerMode()
+
         let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "Initialization")
         let schema = Schema([
             Transcription.self,

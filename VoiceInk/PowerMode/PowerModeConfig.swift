@@ -1,6 +1,211 @@
 import Foundation
 import KeyboardShortcuts
 
+// MARK: - Command Runner Types
+
+/// How the command should be executed
+enum CommandExecutionMode: String, Codable, Equatable {
+    case silent              // Run in background, capture output (legacy, unused)
+    case terminalInteractive // Launch in Ghostty terminal for interactive use
+}
+
+/// Configuration for resuming an agent session
+struct ResumeSpec: Codable, Equatable {
+    let executable: String
+    let argumentsTemplate: [String]  // supports "{{sessionId}}" placeholder
+
+    func buildArguments(sessionId: String) -> [String] {
+        argumentsTemplate.map { $0.replacingOccurrences(of: "{{sessionId}}", with: sessionId) }
+    }
+
+    static func claude(executable: String) -> ResumeSpec {
+        ResumeSpec(executable: executable, argumentsTemplate: ["--resume", "{{sessionId}}"])
+    }
+
+    static func gemini(executable: String) -> ResumeSpec {
+        // Gemini CLI uses --session flag
+        ResumeSpec(executable: executable, argumentsTemplate: ["--session", "{{sessionId}}"])
+    }
+}
+
+struct CommandConfig: Codable, Equatable {
+    let name: String
+    let executable: String
+    let arguments: [String]
+    let workingDirectory: String
+    let pasteOutput: Bool
+    let model: String?
+    let timeout: TimeInterval
+    var executionMode: CommandExecutionMode
+    var resumeSpec: ResumeSpec?
+
+    enum CodingKeys: String, CodingKey {
+        case name, executable, arguments, workingDirectory, pasteOutput, model, timeout
+        case executionMode, resumeSpec
+    }
+
+    init(
+        name: String,
+        executable: String,
+        arguments: [String] = [],
+        workingDirectory: String,
+        pasteOutput: Bool = true,
+        model: String? = nil,
+        timeout: TimeInterval = 120,
+        executionMode: CommandExecutionMode = .terminalInteractive,
+        resumeSpec: ResumeSpec? = nil
+    ) {
+        self.name = name
+        self.executable = executable
+        self.arguments = arguments
+        self.workingDirectory = workingDirectory
+        self.pasteOutput = pasteOutput
+        self.model = model
+        self.timeout = timeout
+        self.executionMode = executionMode
+        self.resumeSpec = resumeSpec
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        executable = try c.decode(String.self, forKey: .executable)
+        arguments = try c.decode([String].self, forKey: .arguments)
+        workingDirectory = try c.decode(String.self, forKey: .workingDirectory)
+        pasteOutput = try c.decode(Bool.self, forKey: .pasteOutput)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        timeout = try c.decode(TimeInterval.self, forKey: .timeout)
+
+        // Migration: if executionMode not present, always use terminalInteractive
+        if let mode = try c.decodeIfPresent(CommandExecutionMode.self, forKey: .executionMode) {
+            executionMode = mode
+        } else {
+            executionMode = .terminalInteractive
+        }
+
+        // Migration: if resumeSpec not present, auto-populate for known agents
+        if let spec = try c.decodeIfPresent(ResumeSpec.self, forKey: .resumeSpec) {
+            resumeSpec = spec
+        } else {
+            // Auto-detect based on executable or name
+            let execName = (executable as NSString).lastPathComponent.lowercased()
+            let nameLower = name.lowercased()
+
+            if execName.contains("claude") || nameLower.contains("claude") {
+                resumeSpec = .claude(executable: executable)
+            } else if execName.contains("gemini") || nameLower.contains("gemini") {
+                resumeSpec = .gemini(executable: executable)
+            } else {
+                resumeSpec = nil
+            }
+        }
+    }
+
+    /// Finds an executable in common locations, returning the first match
+    private static func findExecutable(_ name: String, additionalPaths: [String] = []) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let searchPaths = additionalPaths + [
+            "\(home)/.local/bin/\(name)",
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/usr/bin/\(name)"
+        ]
+
+        for path in searchPaths {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+
+        // Fallback: let the shell find it via command -v
+        return name
+    }
+
+    static func claudeAgent(
+        workingDirectory: String,
+        model: String = "opus"
+    ) -> CommandConfig {
+        let executable = findExecutable("claude")
+        return CommandConfig(
+            name: "Claude Agent",
+            executable: executable,
+            arguments: ["--dangerously-skip-permissions"],
+            workingDirectory: workingDirectory,
+            pasteOutput: false,
+            model: model,
+            timeout: 300,
+            executionMode: .terminalInteractive,
+            resumeSpec: .claude(executable: executable)
+        )
+    }
+
+    static func geminiAgent(
+        workingDirectory: String,
+        model: String = "gemini-2.0-flash-exp"
+    ) -> CommandConfig {
+        let executable = findExecutable("gemini")
+        return CommandConfig(
+            name: "Gemini Agent",
+            executable: executable,
+            arguments: [],
+            workingDirectory: workingDirectory,
+            pasteOutput: false,
+            model: model,
+            timeout: 300,
+            executionMode: .terminalInteractive,
+            resumeSpec: .gemini(executable: executable)
+        )
+    }
+}
+
+enum OutputAction: Codable, Equatable {
+    case paste
+    case pasteAndSend
+    case command(CommandConfig)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case config
+    }
+
+    private enum ActionType: String, Codable {
+        case paste
+        case pasteAndSend
+        case command
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(ActionType.self, forKey: .type)
+
+        switch type {
+        case .paste:
+            self = .paste
+        case .pasteAndSend:
+            self = .pasteAndSend
+        case .command:
+            let config = try container.decode(CommandConfig.self, forKey: .config)
+            self = .command(config)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch self {
+        case .paste:
+            try container.encode(ActionType.paste, forKey: .type)
+        case .pasteAndSend:
+            try container.encode(ActionType.pasteAndSend, forKey: .type)
+        case .command(let config):
+            try container.encode(ActionType.command, forKey: .type)
+            try container.encode(config, forKey: .config)
+        }
+    }
+}
+
+// MARK: - PowerMode Configuration
+
 struct PowerModeConfig: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
@@ -18,9 +223,10 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
     var isEnabled: Bool = true
     var isDefault: Bool = false
     var hotkeyShortcut: String? = nil
-        
+    var outputAction: OutputAction = .paste
+
     enum CodingKeys: String, CodingKey {
-        case id, name, emoji, appConfigs, urlConfigs, isAIEnhancementEnabled, selectedPrompt, selectedLanguage, useScreenCapture, selectedAIProvider, selectedAIModel, isAutoSendEnabled, isEnabled, isDefault, hotkeyShortcut
+        case id, name, emoji, appConfigs, urlConfigs, isAIEnhancementEnabled, selectedPrompt, selectedLanguage, useScreenCapture, selectedAIProvider, selectedAIModel, isAutoSendEnabled, isEnabled, isDefault, hotkeyShortcut, outputAction
         case selectedWhisperModel
         case selectedTranscriptionModelName
     }
@@ -28,7 +234,7 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
     init(id: UUID = UUID(), name: String, emoji: String, appConfigs: [AppConfig]? = nil,
          urlConfigs: [URLConfig]? = nil, isAIEnhancementEnabled: Bool, selectedPrompt: String? = nil,
          selectedTranscriptionModelName: String? = nil, selectedLanguage: String? = nil, useScreenCapture: Bool = false,
-         selectedAIProvider: String? = nil, selectedAIModel: String? = nil, isAutoSendEnabled: Bool = false, isEnabled: Bool = true, isDefault: Bool = false, hotkeyShortcut: String? = nil) {
+         selectedAIProvider: String? = nil, selectedAIModel: String? = nil, isAutoSendEnabled: Bool = false, isEnabled: Bool = true, isDefault: Bool = false, hotkeyShortcut: String? = nil, outputAction: OutputAction = .paste) {
         self.id = id
         self.name = name
         self.emoji = emoji
@@ -45,6 +251,7 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
         self.isEnabled = isEnabled
         self.isDefault = isDefault
         self.hotkeyShortcut = hotkeyShortcut
+        self.outputAction = outputAction
     }
 
     init(from decoder: Decoder) throws {
@@ -64,6 +271,7 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
         hotkeyShortcut = try container.decodeIfPresent(String.self, forKey: .hotkeyShortcut)
+        outputAction = try container.decodeIfPresent(OutputAction.self, forKey: .outputAction) ?? .paste
 
         if let newModelName = try container.decodeIfPresent(String.self, forKey: .selectedTranscriptionModelName) {
             selectedTranscriptionModelName = newModelName
@@ -92,9 +300,10 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
         try container.encode(isEnabled, forKey: .isEnabled)
         try container.encode(isDefault, forKey: .isDefault)
         try container.encodeIfPresent(hotkeyShortcut, forKey: .hotkeyShortcut)
+        try container.encode(outputAction, forKey: .outputAction)
     }
-    
-    
+
+
     static func == (lhs: PowerModeConfig, rhs: PowerModeConfig) -> Bool {
         lhs.id == rhs.id
     }
@@ -316,5 +525,35 @@ class PowerModeManager: ObservableObject {
 
     func isEmojiInUse(_ emoji: String) -> Bool {
         return configurations.contains { $0.emoji == emoji }
+    }
+
+    // MARK: - Silent Claude PowerMode
+
+    func createGeminiAgentPowerMode() {
+        // Check if already exists
+        if configurations.contains(where: { $0.name == "Gemini Agent" }) {
+            print("🤖 Gemini Agent PowerMode already exists")
+            return
+        }
+
+        // Use home directory as default working directory
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+
+        let geminiConfig = CommandConfig.geminiAgent(
+            workingDirectory: homeDir,
+            model: "gemini-2.0-flash-exp"
+        )
+
+        let geminiMode = PowerModeConfig(
+            name: "Gemini Agent",
+            emoji: "🤖",
+            isAIEnhancementEnabled: false,
+            useScreenCapture: false,
+            isEnabled: true,
+            outputAction: .command(geminiConfig)
+        )
+
+        addConfiguration(geminiMode)
+        print("🤖 Created Gemini Agent PowerMode")
     }
 } 
