@@ -12,10 +12,12 @@ enum ModelFilter: String, CaseIterable, Identifiable {
 }
 
 struct ModelManagementView: View {
-    @ObservedObject var whisperState: WhisperState
+    @EnvironmentObject private var whisperModelManager: WhisperModelManager
+    @EnvironmentObject private var fluidAudioModelManager: FluidAudioModelManager
+    @EnvironmentObject private var transcriptionModelManager: TranscriptionModelManager
     @State private var customModelToEdit: CustomCloudModel?
     @StateObject private var aiService = AIService()
-    @StateObject private var customModelManager = CustomModelManager.shared
+    @StateObject private var customModelManager = CustomCloudModelManager.shared
     @EnvironmentObject private var enhancementService: AIEnhancementService
     @Environment(\.modelContext) private var modelContext
     @StateObject private var whisperPrompt = WhisperPrompt()
@@ -23,12 +25,20 @@ struct ModelManagementView: View {
 
     @State private var selectedFilter: ModelFilter = .recommended
     @State private var isShowingSettings = false
-    
+
+    private let settingsPanelWidth: CGFloat = 400
+
     // State for the unified alert
     @State private var isShowingDeleteAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
     @State private var deleteActionClosure: () -> Void = {}
+
+    private func closeSettings() {
+        withAnimation(.smooth(duration: 0.3)) {
+            isShowingSettings = false
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -45,6 +55,9 @@ struct ModelManagementView: View {
         }
         .frame(minWidth: 600, minHeight: 500)
         .background(Color(NSColor.controlBackgroundColor))
+        .slidingPanel(isPresented: $isShowingSettings, width: settingsPanelWidth) {
+            settingsPanelContent
+        }
         .alert(isPresented: $isShowingDeleteAlert) {
             Alert(
                 title: Text(alertTitle),
@@ -54,13 +67,47 @@ struct ModelManagementView: View {
             )
         }
     }
+
+    private var settingsPanelContent: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack(spacing: 12) {
+                Text("Model Settings")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+
+                Spacer()
+
+                Button(action: { closeSettings() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(6)
+                        .background(Color.secondary.opacity(0.1))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .background(Color(NSColor.windowBackgroundColor))
+            .overlay(
+                Divider().opacity(0.5), alignment: .bottom
+            )
+
+            // Content
+            ModelSettingsView(whisperPrompt: whisperPrompt)
+        }
+    }
     
     private var defaultModelSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Default Model")
                 .font(.headline)
                 .foregroundColor(.secondary)
-            Text(whisperState.currentTranscriptionModel?.displayName ?? "No model selected")
+            Text(transcriptionModelManager.currentTranscriptionModel?.displayName ?? "No model selected")
                 .font(.title2)
                 .fontWeight(.bold)
         }
@@ -69,9 +116,9 @@ struct ModelManagementView: View {
         .background(CardBackground(isSelected: false))
         .cornerRadius(10)
     }
-    
+
     private var languageSelectionSection: some View {
-        LanguageSelectionView(whisperState: whisperState, displayMode: .full, whisperPrompt: whisperPrompt)
+        LanguageSelectionView(transcriptionModelManager: transcriptionModelManager, displayMode: .full, whisperPrompt: whisperPrompt)
     }
     
     private var availableModelsSection: some View {
@@ -102,7 +149,7 @@ struct ModelManagementView: View {
                 Spacer()
                 
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(.smooth(duration: 0.3)) {
                         isShowingSettings.toggle()
                     }
                 }) {
@@ -118,22 +165,20 @@ struct ModelManagementView: View {
             }
             .padding(.bottom, 12)
             
-            if isShowingSettings {
-                ModelSettingsView(whisperPrompt: whisperPrompt)
-            } else {
-                VStack(spacing: 12) {
+            VStack(spacing: 12) {
                     ForEach(filteredModels, id: \.id) { model in
-                        let isWarming = (model as? LocalModel).map { localModel in
-                            warmupCoordinator.isWarming(modelNamed: localModel.name)
+                        let isWarming = (model as? WhisperModel).map { whisperModel in
+                            warmupCoordinator.isWarming(modelNamed: whisperModel.name)
                         } ?? false
 
-                        ModelCardRowView(
+                        ModelCardView(
                             model: model,
-                            whisperState: whisperState, 
-                            isDownloaded: whisperState.availableModels.contains { $0.name == model.name },
-                            isCurrent: whisperState.currentTranscriptionModel?.name == model.name,
-                            downloadProgress: whisperState.downloadProgress,
-                            modelURL: whisperState.availableModels.first { $0.name == model.name }?.url,
+                            fluidAudioModelManager: fluidAudioModelManager,
+                            transcriptionModelManager: transcriptionModelManager,
+                            isDownloaded: whisperModelManager.availableModels.contains { $0.name == model.name },
+                            isCurrent: transcriptionModelManager.currentTranscriptionModel?.name == model.name,
+                            downloadProgress: whisperModelManager.downloadProgress,
+                            modelURL: whisperModelManager.availableModels.first { $0.name == model.name }?.url,
                             isWarming: isWarming,
                             deleteAction: {
                                 if let customModel = model as? CustomCloudModel {
@@ -141,15 +186,15 @@ struct ModelManagementView: View {
                                     alertMessage = "Are you sure you want to delete the custom model '\(customModel.displayName)'?"
                                     deleteActionClosure = {
                                         customModelManager.removeCustomModel(withId: customModel.id)
-                                        whisperState.refreshAllAvailableModels()
+                                        transcriptionModelManager.refreshAllAvailableModels()
                                     }
                                     isShowingDeleteAlert = true
-                                } else if let downloadedModel = whisperState.availableModels.first(where: { $0.name == model.name }) {
+                                } else if let downloadedModel = whisperModelManager.availableModels.first(where: { $0.name == model.name }) {
                                     alertTitle = "Delete Model"
                                     alertMessage = "Are you sure you want to delete the model '\(downloadedModel.name)'?"
                                     deleteActionClosure = {
                                         Task {
-                                            await whisperState.deleteModel(downloadedModel)
+                                            await whisperModelManager.deleteModel(downloadedModel)
                                         }
                                     }
                                     isShowingDeleteAlert = true
@@ -157,12 +202,12 @@ struct ModelManagementView: View {
                             },
                             setDefaultAction: {
                                 Task {
-                                    await whisperState.setDefaultTranscriptionModel(model)
+                                    transcriptionModelManager.setDefaultTranscriptionModel(model)
                                 }
                             },
                             downloadAction: {
-                                if let localModel = model as? LocalModel {
-                                    Task { await whisperState.downloadModel(localModel) }
+                                if let whisperModel = model as? WhisperModel {
+                                    Task { await whisperModelManager.downloadModel(whisperModel) }
                                 }
                             },
                             editAction: model.provider == .custom ? { customModel in
@@ -188,8 +233,7 @@ struct ModelManagementView: View {
                             .buttonStyle(.plain)
 
                             InfoTip(
-                                title: "Import local Whisper models",
-                                message: "Add a custom fine-tuned whisper model to use with VoiceInk. Select the downloaded .bin file.",
+                                "Add a custom fine-tuned whisper model to use with VoiceInk. Select the downloaded .bin file.",
                                 learnMoreURL: "https://tryvoiceink.com/docs/custom-local-whisper-models"
                             )
                             .help("Read more about custom local models")
@@ -197,21 +241,30 @@ struct ModelManagementView: View {
                     }
                     
                     if selectedFilter == .custom {
-                        // Add Custom Model Card at the bottom
+                        HStack(spacing: 6) {
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 12))
+                            Text("Only OpenAI-compatible transcription APIs are supported.")
+                                .font(.system(size: 12))
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.bottom, 4)
+
                         AddCustomModelCardView(
                             customModelManager: customModelManager,
                             editingModel: customModelToEdit
                         ) {
                             // Refresh the models when a new custom model is added
-                            whisperState.refreshAllAvailableModels()
+                            transcriptionModelManager.refreshAllAvailableModels()
                             customModelToEdit = nil // Clear editing state
                         }
                     }
                 }
             }
-        }
         .padding()
     }
+
+
 
     private var intelMacWarningBanner: some View {
         HStack(spacing: 10) {
@@ -253,22 +306,24 @@ struct ModelManagementView: View {
     private var filteredModels: [any TranscriptionModel] {
         switch selectedFilter {
         case .recommended:
-            return whisperState.allAvailableModels.filter {
-                let recommendedNames = ["ggml-base.en", "ggml-large-v3-turbo-q5_0", "ggml-large-v3-turbo", "whisper-large-v3-turbo"]
+            return transcriptionModelManager.allAvailableModels.filter {
+                let recommendedNames = ["ggml-base.en", "parakeet-tdt-0.6b-v2", "ggml-large-v3-turbo-q5_0", "whisper-large-v3-turbo"]
                 return recommendedNames.contains($0.name)
             }.sorted { model1, model2 in
-                let recommendedOrder = ["ggml-base.en", "ggml-large-v3-turbo-q5_0", "ggml-large-v3-turbo", "whisper-large-v3-turbo"]
+                let recommendedOrder = ["ggml-base.en", "parakeet-tdt-0.6b-v2", "ggml-large-v3-turbo-q5_0", "whisper-large-v3-turbo"]
                 let index1 = recommendedOrder.firstIndex(of: model1.name) ?? Int.max
                 let index2 = recommendedOrder.firstIndex(of: model2.name) ?? Int.max
                 return index1 < index2
             }
         case .local:
-            return whisperState.allAvailableModels.filter { $0.provider == .local || $0.provider == .nativeApple || $0.provider == .parakeet }
+            return transcriptionModelManager.allAvailableModels.filter {
+                ($0.provider == .whisper || $0.provider == .nativeApple || $0.provider == .fluidAudio)
+                    && transcriptionModelManager.isAvailableOnCurrentOS($0)
+            }
         case .cloud:
-            let cloudProviders: [ModelProvider] = [.groq, .elevenLabs, .deepgram, .mistral, .gemini, .soniox]
-            return whisperState.allAvailableModels.filter { cloudProviders.contains($0.provider) }
+            return transcriptionModelManager.allAvailableModels.filter { CloudProviderRegistry.provider(for: $0.provider) != nil }
         case .custom:
-            return whisperState.allAvailableModels.filter { $0.provider == .custom }
+            return transcriptionModelManager.allAvailableModels.filter { $0.provider == .custom }
         }
     }
 
@@ -282,7 +337,7 @@ struct ModelManagementView: View {
         panel.title = "Select a Whisper ggml .bin model"
         if panel.runModal() == .OK, let url = panel.url {
             Task { @MainActor in
-                await whisperState.importLocalModel(from: url)
+                await whisperModelManager.importWhisperModel(from: url)
             }
         }
     }

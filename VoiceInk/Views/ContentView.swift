@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import KeyboardShortcuts
+import OSLog
 
 // ViewType enum with all cases
 enum ViewType: String, CaseIterable, Identifiable {
@@ -54,9 +55,12 @@ struct VisualEffectView: NSViewRepresentable {
 }
 
 struct ContentView: View {
+    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "ContentView")
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme) private var colorScheme
-    @EnvironmentObject private var whisperState: WhisperState
+    @EnvironmentObject private var engine: VoiceInkEngine
+    @EnvironmentObject private var whisperModelManager: WhisperModelManager
+    @EnvironmentObject private var transcriptionModelManager: TranscriptionModelManager
     @EnvironmentObject private var hotkeyManager: HotkeyManager
     @AppStorage("powerModeUIFlag") private var powerModeUIFlag = false
     @State private var selectedView: ViewType? = .metrics
@@ -106,25 +110,11 @@ struct ContentView: View {
 
                 ForEach(visibleViewTypes) { viewType in
                     Section {
-                        if viewType == .history {
-                            Button(action: {
-                                HistoryWindowController.shared.showHistoryWindow(
-                                    modelContainer: modelContext.container,
-                                    whisperState: whisperState
-                                )
-                            }) {
-                                SidebarItemView(viewType: viewType)
-                            }
-                            .buttonStyle(.plain)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                            .listRowSeparator(.hidden)
-                        } else {
-                            NavigationLink(value: viewType) {
-                                SidebarItemView(viewType: viewType)
-                            }
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-                            .listRowSeparator(.hidden)
+                        NavigationLink(value: viewType) {
+                            SidebarItemView(viewType: viewType)
                         }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        .listRowSeparator(.hidden)
                     }
                 }
             }
@@ -144,8 +134,15 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
         .frame(width: 950)
         .frame(minHeight: 730)
+        .onAppear {
+            logger.notice("ContentView appeared")
+        }
+        .onDisappear {
+            logger.notice("ContentView disappeared")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .navigateToDestination)) { notification in
             if let destination = notification.userInfo?["destination"] as? String {
+                logger.notice("navigateToDestination received: \(destination, privacy: .public)")
                 switch destination {
                 case "Settings":
                     selectedView = .settings
@@ -154,10 +151,7 @@ struct ContentView: View {
                 case "VoiceInk Pro":
                     selectedView = .license
                 case "History":
-                    HistoryWindowController.shared.showHistoryWindow(
-                        modelContainer: modelContext.container,
-                        whisperState: whisperState
-                    )
+                    selectedView = .history
                 case "Permissions":
                     selectedView = .permissions
                 case "Enhancement":
@@ -179,23 +173,21 @@ struct ContentView: View {
         case .metrics:
             MetricsView()
         case .models:
-            ModelManagementView(whisperState: whisperState)
+            ModelManagementView()
         case .enhancement:
             EnhancementSettingsView()
         case .transcribeAudio:
             AudioTranscribeView()
         case .history:
-            Text("History")
-                .foregroundColor(.secondary)
+            InlineHistoryView()
         case .audioInput:
             AudioInputSettingsView()
         case .dictionary:
-            DictionarySettingsView(whisperPrompt: whisperState.whisperPrompt)
+            DictionarySettingsView(whisperPrompt: whisperModelManager.whisperPrompt)
         case .powerMode:
             PowerModeView()
         case .settings:
             SettingsView()
-                .environmentObject(whisperState)
         case .license:
             LicenseManagementView()
         case .permissions:
@@ -218,6 +210,8 @@ private struct SidebarItemView: View {
 
             Spacer()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .padding(.vertical, 8)
         .padding(.horizontal, 2)
     }

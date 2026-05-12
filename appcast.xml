@@ -3,25 +3,24 @@
     <channel>
         <title>VoiceInk</title>
         <item>
-            <title>1.67</title>
-            <pubDate>Tue, 07 Jan 2026 12:00:00 +0545</pubDate>
-            <sparkle:version>167</sparkle:version>
-            <sparkle:shortVersionString>1.67</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <title>1.76</title>
             <description><![CDATA[
-
-                <h3>What's New in Version 1.67</h3>
+                <h3>What's New in v1.76</h3>
                 <ul>
-                    <li>Keyboard shortcuts to toggle specific Power Modes directly</li>
-                    <li>Dedicated transcript history window with global keyboard shortcut access</li>
-                    <li>GPT-5.2 model support</li>
-                    <li>Configurable audio resume delay for Bluetooth headphones</li>
-                    <li>Redesigned Power Mode & Enhancement UI</li>
-                    <li>Minor bug fixes and improvements</li>
+                    <li>🦜 Updated Parakeet model (delete and re-download the model)</li>
+                    <li>☁️ Added AssemblyAI and Cartesia transcription models</li>
+                    <li>📝 Added transcription formatting controls</li>
+                    <li>📊 Stats are now stored separately from transcript history</li>
+                    <li>🎙️ Improved recording startup reliability</li>
+                    <li>🍎 Fixed Apple Speech issue</li>
+                    <li>🐛 Minor fixes and improvements</li>
                 </ul>
-
             ]]></description>
-            <enclosure url="https://github.com/Beingpax/VoiceInk/releases/download/v1.67/VoiceInk.dmg" length="10785277" type="application/octet-stream" sparkle:edSignature="mAvwccTy7ltp5SBU7ay+rMbLo3tJKhyHhGhD1iHdg54C9UMTpubgyLSMksYPzT9YJciT73jdPIIW0/Vwt4i6DQ=="/>
+            <pubDate>Thu, 07 May 2026 22:22:54 +0545</pubDate>
+            <sparkle:version>176</sparkle:version>
+            <sparkle:shortVersionString>1.76</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/Beingpax/VoiceInk/releases/download/v1.76/VoiceInk.dmg" length="14248109" type="application/octet-stream" sparkle:edSignature="VIHBaVue5hfpx8nQsB0VS3tliha3Dx8B/MWZ5vRNWNNufmjh3P86VRKt/vH1sVfV37g7I84TVpuTaPc0YRAxCw=="/>
         </item>
     </channel>
 </rss>

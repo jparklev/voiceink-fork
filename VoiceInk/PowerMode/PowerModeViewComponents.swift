@@ -94,7 +94,7 @@ struct ConfigurationRow: View {
     let powerModeManager: PowerModeManager
     let onEditConfig: (PowerModeConfig) -> Void
     @EnvironmentObject var enhancementService: AIEnhancementService
-    @EnvironmentObject var whisperState: WhisperState
+    @EnvironmentObject var transcriptionModelManager: TranscriptionModelManager
     @State private var isHovering = false
     
     private let maxAppIconsToShow = 5
@@ -107,7 +107,7 @@ struct ConfigurationRow: View {
     
     private var selectedModel: String? {
         if let modelName = config.selectedTranscriptionModelName,
-           let model = whisperState.allAvailableModels.first(where: { $0.name == modelName }) {
+           let model = transcriptionModelManager.allAvailableModels.first(where: { $0.name == modelName }) {
             return model.displayName
         }
         return "Default"
@@ -119,8 +119,8 @@ struct ConfigurationRow: View {
             if langCode == "en" { return "English" }
             
             if let modelName = config.selectedTranscriptionModelName,
-               let model = whisperState.allAvailableModels.first(where: { $0.name == modelName }),
-               let langName = model.supportedLanguages[langCode] {
+               let model = transcriptionModelManager.allAvailableModels.first(where: { $0.name == modelName }),
+               let langName = TranscriptionLanguageSupport.languages(for: model)[langCode] {
                 return langName
             }
             return langCode.uppercased()
@@ -211,7 +211,7 @@ struct ConfigurationRow: View {
             .padding(.vertical, 12)
             .padding(.horizontal, 14)
             
-            if selectedModel != nil || selectedLanguage != nil || config.isAIEnhancementEnabled || config.isAutoSendEnabled {
+            if selectedModel != nil || selectedLanguage != nil || config.isAIEnhancementEnabled || config.autoSendKey.isEnabled {
                 Divider()
                 
                 HStack(spacing: 8) {
@@ -266,11 +266,11 @@ struct ConfigurationRow: View {
                         )
                     }
                     
-                    if config.isAutoSendEnabled {
+                    if config.autoSendKey.isEnabled {
                         HStack(spacing: 4) {
                             Image(systemName: "keyboard")
                                 .font(.system(size: 10))
-                            Text("Auto Send")
+                            Text(config.autoSendKey.displayName)
                                 .font(.caption)
                         }
                         .padding(.horizontal, 6)

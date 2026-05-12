@@ -9,6 +9,9 @@ struct ApplicationState: Codable {
     var selectedAIModel: String?
     var selectedLanguage: String?
     var transcriptionModelName: String?
+    var isTextFormattingEnabled: Bool?
+    var removePunctuation: Bool?
+    var lowercaseTranscription: Bool?
 }
 
 struct PowerModeSession: Codable {
@@ -23,20 +26,21 @@ class PowerModeSessionManager {
     private let sessionKey = "powerModeActiveSession.v1"
     private var isApplyingPowerModeConfig = false
 
-    private var whisperState: WhisperState?
+    private weak var stateProvider: (any PowerModeStateProvider)?
     private var enhancementService: AIEnhancementService?
 
     private init() {
         recoverSession()
     }
 
-    func configure(whisperState: WhisperState, enhancementService: AIEnhancementService) {
-        self.whisperState = whisperState
+    /// Configure with new VoiceInkEngine-based provider.
+    func configure(engine: any PowerModeStateProvider, enhancementService: AIEnhancementService) {
+        self.stateProvider = engine
         self.enhancementService = enhancementService
     }
 
     func beginSession(with config: PowerModeConfig) async {
-        guard let whisperState = whisperState, let enhancementService = enhancementService else {
+        guard let stateProvider = stateProvider, let enhancementService = enhancementService else {
             print("SessionManager not configured.")
             return
         }
@@ -50,7 +54,10 @@ class PowerModeSessionManager {
                 selectedAIProvider: enhancementService.getAIService()?.selectedProvider.rawValue,
                 selectedAIModel: enhancementService.getAIService()?.currentModel,
                 selectedLanguage: UserDefaults.standard.string(forKey: "SelectedLanguage"),
-                transcriptionModelName: whisperState.currentTranscriptionModel?.name
+                transcriptionModelName: stateProvider.currentTranscriptionModel?.name,
+                isTextFormattingEnabled: UserDefaults.standard.bool(forKey: "IsTextFormattingEnabled"),
+                removePunctuation: UserDefaults.standard.bool(forKey: "RemovePunctuation"),
+                lowercaseTranscription: UserDefaults.standard.bool(forKey: "LowercaseTranscription")
             )
 
             let newSession = PowerModeSession(
@@ -79,16 +86,18 @@ class PowerModeSessionManager {
         isApplyingPowerModeConfig = true
         await restoreState(session.originalState)
         isApplyingPowerModeConfig = false
-        
+
         NotificationCenter.default.removeObserver(self, name: .AppSettingsDidChange, object: nil)
 
         clearSession()
     }
-    
+
     @objc func updateSessionSnapshot() {
         guard !isApplyingPowerModeConfig else { return }
-        
-        guard var session = loadSession(), let whisperState = whisperState, let enhancementService = enhancementService else { return }
+
+        guard var session = loadSession(),
+              let stateProvider = stateProvider,
+              let enhancementService = enhancementService else { return }
 
         let updatedState = ApplicationState(
             isEnhancementEnabled: enhancementService.isEnhancementEnabled,
@@ -97,15 +106,19 @@ class PowerModeSessionManager {
             selectedAIProvider: enhancementService.getAIService()?.selectedProvider.rawValue,
             selectedAIModel: enhancementService.getAIService()?.currentModel,
             selectedLanguage: UserDefaults.standard.string(forKey: "SelectedLanguage"),
-            transcriptionModelName: whisperState.currentTranscriptionModel?.name
+            transcriptionModelName: stateProvider.currentTranscriptionModel?.name,
+            isTextFormattingEnabled: UserDefaults.standard.bool(forKey: "IsTextFormattingEnabled"),
+            removePunctuation: UserDefaults.standard.bool(forKey: "RemovePunctuation"),
+            lowercaseTranscription: UserDefaults.standard.bool(forKey: "LowercaseTranscription")
         )
-        
+
         session.originalState = updatedState
         saveSession(session)
     }
 
     private func applyConfiguration(_ config: PowerModeConfig) async {
-        guard let enhancementService = enhancementService else { return }
+        guard let enhancementService = enhancementService,
+              let stateProvider = stateProvider else { return }
 
         await MainActor.run {
             enhancementService.isEnhancementEnabled = config.isAIEnhancementEnabled
@@ -126,26 +139,29 @@ class PowerModeSessionManager {
                 }
             }
 
-            if let language = config.selectedLanguage {
-                UserDefaults.standard.set(language, forKey: "SelectedLanguage")
-                NotificationCenter.default.post(name: .languageDidChange, object: nil)
-            }
+            UserDefaults.standard.set(config.isTextFormattingEnabled, forKey: "IsTextFormattingEnabled")
+            UserDefaults.standard.set(config.removePunctuation, forKey: "RemovePunctuation")
+            UserDefaults.standard.set(config.lowercaseTranscription, forKey: "LowercaseTranscription")
         }
 
-        if let whisperState = whisperState,
-           let modelName = config.selectedTranscriptionModelName,
-           let selectedModel = await whisperState.allAvailableModels.first(where: { $0.name == modelName }),
-           whisperState.currentTranscriptionModel?.name != modelName {
+        if let modelName = config.selectedTranscriptionModelName,
+           let selectedModel = await stateProvider.allAvailableModels.first(where: { $0.name == modelName }),
+           stateProvider.currentTranscriptionModel?.name != modelName {
             await handleModelChange(to: selectedModel)
         }
-        
+
+        if let language = config.selectedLanguage {
+            applyCompatibleLanguage(language, preferredModelName: config.selectedTranscriptionModelName)
+        }
+
         await MainActor.run {
             NotificationCenter.default.post(name: .powerModeConfigurationApplied, object: nil)
         }
     }
 
     private func restoreState(_ state: ApplicationState) async {
-        guard let enhancementService = enhancementService else { return }
+        guard let enhancementService = enhancementService,
+              let stateProvider = stateProvider else { return }
 
         await MainActor.run {
             enhancementService.isEnhancementEnabled = state.isEnhancementEnabled
@@ -161,43 +177,67 @@ class PowerModeSessionManager {
                 }
             }
 
-            if let language = state.selectedLanguage {
-                UserDefaults.standard.set(language, forKey: "SelectedLanguage")
-                NotificationCenter.default.post(name: .languageDidChange, object: nil)
+            if let isTextFormattingEnabled = state.isTextFormattingEnabled {
+                UserDefaults.standard.set(isTextFormattingEnabled, forKey: "IsTextFormattingEnabled")
+            }
+            if let removePunctuation = state.removePunctuation {
+                UserDefaults.standard.set(removePunctuation, forKey: "RemovePunctuation")
+            }
+            if let lowercaseTranscription = state.lowercaseTranscription {
+                UserDefaults.standard.set(lowercaseTranscription, forKey: "LowercaseTranscription")
             }
         }
 
-        if let whisperState = whisperState,
-           let modelName = state.transcriptionModelName,
-           let selectedModel = await whisperState.allAvailableModels.first(where: { $0.name == modelName }),
-           whisperState.currentTranscriptionModel?.name != modelName {
+        if let modelName = state.transcriptionModelName,
+           let selectedModel = await stateProvider.allAvailableModels.first(where: { $0.name == modelName }),
+           stateProvider.currentTranscriptionModel?.name != modelName {
             await handleModelChange(to: selectedModel)
         }
-    }
-    
-    private func handleModelChange(to newModel: any TranscriptionModel) async {
-        guard let whisperState = whisperState else { return }
 
-        await whisperState.setDefaultTranscriptionModel(newModel)
-
-        switch newModel.provider {
-        case .local:
-            await whisperState.cleanupModelResources()
-            if let localModel = await whisperState.availableModels.first(where: { $0.name == newModel.name }) {
-                do {
-                    try await whisperState.loadModel(localModel)
-                } catch {
-                    print("Power Mode: Failed to load local model '\(localModel.name)': \(error)")
-                }
-            }
-        case .parakeet:
-            await whisperState.cleanupModelResources()
-
-        default:
-            await whisperState.cleanupModelResources()
+        if let language = state.selectedLanguage {
+            applyCompatibleLanguage(language, preferredModelName: state.transcriptionModelName)
         }
     }
-    
+
+    private func applyCompatibleLanguage(_ language: String, preferredModelName: String?) {
+        guard let model = model(named: preferredModelName) ?? stateProvider?.currentTranscriptionModel else {
+            UserDefaults.standard.set(language, forKey: "SelectedLanguage")
+            NotificationCenter.default.post(name: .languageDidChange, object: nil)
+            return
+        }
+
+        let compatibleLanguage = TranscriptionLanguageSupport.validLanguageOrFallback(language, for: model)
+        UserDefaults.standard.set(compatibleLanguage, forKey: "SelectedLanguage")
+        NotificationCenter.default.post(name: .languageDidChange, object: nil)
+    }
+
+    private func model(named modelName: String?) -> (any TranscriptionModel)? {
+        guard let modelName else { return nil }
+        return stateProvider?.allAvailableModels.first { $0.name == modelName }
+    }
+
+    private func handleModelChange(to newModel: any TranscriptionModel) async {
+        guard let stateProvider = stateProvider else { return }
+
+        await stateProvider.setDefaultTranscriptionModel(newModel)
+
+        switch newModel.provider {
+        case .whisper:
+            await stateProvider.cleanupModelResources()
+            if let whisperModel = await stateProvider.availableModels.first(where: { $0.name == newModel.name }) {
+                do {
+                    try await stateProvider.loadModel(whisperModel)
+                } catch {
+                    print("Power Mode: Failed to load local model '\(whisperModel.name)': \(error)")
+                }
+            }
+        case .fluidAudio:
+            await stateProvider.cleanupModelResources()
+        default:
+            await stateProvider.cleanupModelResources()
+        }
+    }
+
     private func recoverSession() {
         guard let session = loadSession() else { return }
         print("Recovering abandoned Power Mode session.")
@@ -214,7 +254,7 @@ class PowerModeSessionManager {
             print("Error saving Power Mode session: \(error)")
         }
     }
-    
+
     private func loadSession() -> PowerModeSession? {
         guard let data = UserDefaults.standard.data(forKey: sessionKey) else { return nil }
         do {

@@ -2,8 +2,6 @@ import SwiftUI
 import KeyboardShortcuts
 
 struct EnhancementShortcutsView: View {
-    @ObservedObject private var shortcutSettings = EnhancementShortcutSettings.shared
-
     var body: some View {
         VStack(spacing: 8) {
             // Toggle AI Enhancement
@@ -13,24 +11,15 @@ struct EnhancementShortcutsView: View {
                         .font(.system(size: 13))
 
                     InfoTip(
-                        title: "Toggle AI Enhancement",
-                        message: "Quickly enable or disable AI enhancement while recording. Available only when VoiceInk is running and the recorder is visible.",
+                        "Quickly enable or disable AI enhancement while recording. Available only when VoiceInk is running and the recorder is visible.",
                         learnMoreURL: "https://tryvoiceink.com/docs/enhancement-shortcuts"
                     )
                 }
 
                 Spacer()
 
-                HStack(spacing: 10) {
-                    HStack(spacing: 4) {
-                        KeyChip(label: "⌘")
-                        KeyChip(label: "E")
-                    }
-
-                    Toggle("", isOn: $shortcutSettings.isToggleEnhancementShortcutEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
+                KeyboardShortcuts.Recorder(for: .toggleEnhancement)
+                    .controlSize(.small)
             }
 
             // Switch Enhancement Prompt
@@ -40,8 +29,7 @@ struct EnhancementShortcutsView: View {
                         .font(.system(size: 13))
 
                     InfoTip(
-                        title: "Switch Enhancement Prompt",
-                        message: "Switch between your saved prompts using ⌘1 through ⌘0 to activate the corresponding prompt in the order they are saved. Available only when VoiceInk is running and the recorder is visible.",
+                        "Switch between your saved prompts using ⌘1 through ⌘0 to activate the corresponding prompt in the order they are saved. Available only when VoiceInk is running and the recorder is visible.",
                         learnMoreURL: "https://tryvoiceink.com/docs/enhancement-shortcuts"
                     )
                 }

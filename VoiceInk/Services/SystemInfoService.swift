@@ -34,6 +34,8 @@ class SystemInfoService {
         HOTKEY SETTINGS:
         Primary Hotkey: \(getPrimaryHotkey())
         Secondary Hotkey: \(getSecondaryHotkey())
+        Middle-Click Recording: \(UserDefaults.standard.bool(forKey: "isMiddleClickToggleEnabled"))
+        Middle-Click Activation Delay: \(UserDefaults.standard.integer(forKey: "middleClickActivationDelay")) ms
 
         TRANSCRIPTION SETTINGS:
         Selected Model: \(getCurrentTranscriptionModel())
@@ -41,6 +43,31 @@ class SystemInfoService {
         AI Enhancement: \(getAIEnhancementStatus())
         AI Provider: \(getAIProvider())
         AI Model: \(getAIModel())
+
+        UI SETTINGS:
+        Hide Dock Icon: \(UserDefaults.standard.bool(forKey: "IsMenuBarOnly"))
+        Recorder Style: \(UserDefaults.standard.string(forKey: "RecorderType") ?? "mini")
+
+        RECORDING FEEDBACK:
+        Sound Feedback: \(UserDefaults.standard.bool(forKey: "isSoundFeedbackEnabled"))
+        Pause Media While Recording: \(UserDefaults.standard.bool(forKey: "isPauseMediaEnabled"))
+        Mute Audio While Recording: \(UserDefaults.standard.bool(forKey: "isSystemMuteEnabled"))
+        Audio Resumption Delay: \(UserDefaults.standard.double(forKey: "audioResumptionDelay"))s
+
+        CLIPBOARD & PASTE SETTINGS:
+        Restore Clipboard After Paste: \(UserDefaults.standard.bool(forKey: "restoreClipboardAfterPaste"))
+        Clipboard Restore Delay: \(UserDefaults.standard.double(forKey: "clipboardRestoreDelay"))s
+        Use AppleScript Paste: \(UserDefaults.standard.bool(forKey: "useAppleScriptPaste"))
+
+        POWER MODE:
+        Power Mode Enabled: \(UserDefaults.standard.bool(forKey: "powerModeUIFlag"))
+        Persist Configured Preferences: \(UserDefaults.standard.bool(forKey: "powerModePersistConfig"))
+
+        DATA CLEANUP SETTINGS:
+        Auto-Delete Transcriptions: \(UserDefaults.standard.bool(forKey: "IsTranscriptionCleanupEnabled"))
+        Transcription Retention: \(UserDefaults.standard.integer(forKey: "TranscriptionRetentionMinutes")) minutes
+        Auto-Delete Audio Files: \(UserDefaults.standard.bool(forKey: "IsAudioCleanupEnabled"))
+        Audio Retention Period: \(UserDefaults.standard.integer(forKey: "AudioRetentionPeriod")) days
 
         PERMISSIONS:
         Accessibility: \(getAccessibilityStatus())
@@ -101,11 +128,11 @@ class SystemInfoService {
 
     private func getCurrentAudioDevice() -> String {
         let audioManager = AudioDeviceManager.shared
-        if let deviceID = audioManager.selectedDeviceID ?? audioManager.fallbackDeviceID,
-           let deviceName = audioManager.getDeviceName(deviceID: deviceID) {
+        let deviceID = audioManager.getCurrentDevice()
+        if deviceID != 0, let deviceName = audioManager.getDeviceName(deviceID: deviceID) {
             return deviceName
         }
-        return "System Default"
+        return "Unknown"
     }
 
     private func getAvailableAudioDevices() -> String {
@@ -134,7 +161,7 @@ class SystemInfoService {
 
     private func getCurrentTranscriptionModel() -> String {
         if let modelName = UserDefaults.standard.string(forKey: "CurrentTranscriptionModel") {
-            if let model = PredefinedModels.models.first(where: { $0.name == modelName }) {
+            if let model = TranscriptionModelRegistry.models.first(where: { $0.name == modelName }) {
                 return model.displayName
             }
             return modelName

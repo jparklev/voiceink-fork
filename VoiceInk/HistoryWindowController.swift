@@ -13,7 +13,7 @@ class HistoryWindowController: NSObject, NSWindowDelegate {
         super.init()
     }
 
-    func showHistoryWindow(modelContainer: ModelContainer, whisperState: WhisperState) {
+    func showHistoryWindow(modelContainer: ModelContainer, engine: VoiceInkEngine) {
         if let existingWindow = historyWindow {
             if existingWindow.isMiniaturized {
                 existingWindow.deminiaturize(nil)
@@ -23,22 +23,23 @@ class HistoryWindowController: NSObject, NSWindowDelegate {
             return
         }
 
-        let window = createHistoryWindow(modelContainer: modelContainer, whisperState: whisperState)
+        let window = createHistoryWindow(modelContainer: modelContainer, engine: engine)
         historyWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private func createHistoryWindow(modelContainer: ModelContainer, whisperState: WhisperState) -> NSWindow {
+    private func createHistoryWindow(modelContainer: ModelContainer, engine: VoiceInkEngine) -> NSWindow {
         let historyView = TranscriptionHistoryView()
             .modelContainer(modelContainer)
-            .environmentObject(whisperState)
-            .frame(minWidth: 1000, minHeight: 700)
+            .environmentObject(engine)
+            .environmentObject(engine.enhancementService!)
+            .frame(minWidth: 1150, minHeight: 700)
 
         let hostingController = NSHostingController(rootView: historyView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 750),
+            contentRect: NSRect(x: 0, y: 0, width: 1250, height: 750),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -53,7 +54,7 @@ class HistoryWindowController: NSObject, NSWindowDelegate {
         window.backgroundColor = NSColor.windowBackgroundColor
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary]
-        window.minSize = NSSize(width: 1000, height: 700)
+        window.minSize = NSSize(width: 1150, height: 700)
 
         window.setFrameAutosaveName(windowAutosaveName)
         if !window.setFrameUsingName(windowAutosaveName) {

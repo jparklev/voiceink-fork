@@ -1,6 +1,26 @@
 import Foundation
 import KeyboardShortcuts
 
+enum AutoSendKey: String, Codable, CaseIterable {
+    case none = "none"
+    case enter = "enter"
+    case shiftEnter = "shiftEnter"
+    case commandEnter = "commandEnter"
+
+    var displayName: String {
+        switch self {
+        case .none: return "None"
+        case .enter: return "Return (⏎)"
+        case .shiftEnter: return "Shift + Return (⇧⏎)"
+        case .commandEnter: return "Command + Return (⌘⏎)"
+        }
+    }
+
+    var isEnabled: Bool {
+        self != .none
+    }
+}
+
 struct PowerModeConfig: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
@@ -11,16 +31,19 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
     var selectedPrompt: String?
     var selectedTranscriptionModelName: String?
     var selectedLanguage: String?
+    var isTextFormattingEnabled: Bool = false
+    var removePunctuation: Bool = false
+    var lowercaseTranscription: Bool = false
     var useScreenCapture: Bool
     var selectedAIProvider: String?
     var selectedAIModel: String?
-    var isAutoSendEnabled: Bool = false
+    var autoSendKey: AutoSendKey = .none
     var isEnabled: Bool = true
     var isDefault: Bool = false
     var hotkeyShortcut: String? = nil
         
     enum CodingKeys: String, CodingKey {
-        case id, name, emoji, appConfigs, urlConfigs, isAIEnhancementEnabled, selectedPrompt, selectedLanguage, useScreenCapture, selectedAIProvider, selectedAIModel, isAutoSendEnabled, isEnabled, isDefault, hotkeyShortcut
+        case id, name, emoji, appConfigs, urlConfigs, isAIEnhancementEnabled, selectedPrompt, selectedLanguage, isTextFormattingEnabled, removePunctuation, lowercaseTranscription, useScreenCapture, selectedAIProvider, selectedAIModel, isAutoSendEnabled, autoSendKey, isEnabled, isDefault, hotkeyShortcut
         case selectedWhisperModel
         case selectedTranscriptionModelName
     }
@@ -28,7 +51,8 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
     init(id: UUID = UUID(), name: String, emoji: String, appConfigs: [AppConfig]? = nil,
          urlConfigs: [URLConfig]? = nil, isAIEnhancementEnabled: Bool, selectedPrompt: String? = nil,
          selectedTranscriptionModelName: String? = nil, selectedLanguage: String? = nil, useScreenCapture: Bool = false,
-         selectedAIProvider: String? = nil, selectedAIModel: String? = nil, isAutoSendEnabled: Bool = false, isEnabled: Bool = true, isDefault: Bool = false, hotkeyShortcut: String? = nil) {
+         isTextFormattingEnabled: Bool = false, removePunctuation: Bool = false, lowercaseTranscription: Bool = false,
+         selectedAIProvider: String? = nil, selectedAIModel: String? = nil, autoSendKey: AutoSendKey = .none, isEnabled: Bool = true, isDefault: Bool = false, hotkeyShortcut: String? = nil) {
         self.id = id
         self.name = name
         self.emoji = emoji
@@ -37,11 +61,14 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
         self.isAIEnhancementEnabled = isAIEnhancementEnabled
         self.selectedPrompt = selectedPrompt
         self.useScreenCapture = useScreenCapture
-        self.isAutoSendEnabled = isAutoSendEnabled
+        self.autoSendKey = autoSendKey
         self.selectedAIProvider = selectedAIProvider ?? UserDefaults.standard.string(forKey: "selectedAIProvider")
         self.selectedAIModel = selectedAIModel
         self.selectedTranscriptionModelName = selectedTranscriptionModelName ?? UserDefaults.standard.string(forKey: "CurrentTranscriptionModel")
         self.selectedLanguage = selectedLanguage ?? UserDefaults.standard.string(forKey: "SelectedLanguage") ?? "en"
+        self.isTextFormattingEnabled = isTextFormattingEnabled
+        self.removePunctuation = removePunctuation
+        self.lowercaseTranscription = lowercaseTranscription
         self.isEnabled = isEnabled
         self.isDefault = isDefault
         self.hotkeyShortcut = hotkeyShortcut
@@ -57,10 +84,21 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
         isAIEnhancementEnabled = try container.decode(Bool.self, forKey: .isAIEnhancementEnabled)
         selectedPrompt = try container.decodeIfPresent(String.self, forKey: .selectedPrompt)
         selectedLanguage = try container.decodeIfPresent(String.self, forKey: .selectedLanguage)
+        isTextFormattingEnabled = try container.decodeIfPresent(Bool.self, forKey: .isTextFormattingEnabled) ?? false
+        removePunctuation = try container.decodeIfPresent(Bool.self, forKey: .removePunctuation) ?? false
+        lowercaseTranscription = try container.decodeIfPresent(Bool.self, forKey: .lowercaseTranscription) ?? false
         useScreenCapture = try container.decode(Bool.self, forKey: .useScreenCapture)
         selectedAIProvider = try container.decodeIfPresent(String.self, forKey: .selectedAIProvider)
         selectedAIModel = try container.decodeIfPresent(String.self, forKey: .selectedAIModel)
-        isAutoSendEnabled = try container.decodeIfPresent(Bool.self, forKey: .isAutoSendEnabled) ?? false
+        // Migrate from old isAutoSendEnabled bool to new autoSendKey enum
+        if let rawValue = try container.decodeIfPresent(String.self, forKey: .autoSendKey),
+           let newKey = AutoSendKey(rawValue: rawValue) {
+            autoSendKey = newKey
+        } else if let oldBool = try container.decodeIfPresent(Bool.self, forKey: .isAutoSendEnabled), oldBool {
+            autoSendKey = .enter
+        } else {
+            autoSendKey = .none
+        }
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
         hotkeyShortcut = try container.decodeIfPresent(String.self, forKey: .hotkeyShortcut)
@@ -84,10 +122,13 @@ struct PowerModeConfig: Codable, Identifiable, Equatable {
         try container.encode(isAIEnhancementEnabled, forKey: .isAIEnhancementEnabled)
         try container.encodeIfPresent(selectedPrompt, forKey: .selectedPrompt)
         try container.encodeIfPresent(selectedLanguage, forKey: .selectedLanguage)
+        try container.encode(isTextFormattingEnabled, forKey: .isTextFormattingEnabled)
+        try container.encode(removePunctuation, forKey: .removePunctuation)
+        try container.encode(lowercaseTranscription, forKey: .lowercaseTranscription)
         try container.encode(useScreenCapture, forKey: .useScreenCapture)
         try container.encodeIfPresent(selectedAIProvider, forKey: .selectedAIProvider)
         try container.encodeIfPresent(selectedAIModel, forKey: .selectedAIModel)
-        try container.encode(isAutoSendEnabled, forKey: .isAutoSendEnabled)
+        try container.encode(autoSendKey, forKey: .autoSendKey)
         try container.encodeIfPresent(selectedTranscriptionModelName, forKey: .selectedTranscriptionModelName)
         try container.encode(isEnabled, forKey: .isEnabled)
         try container.encode(isDefault, forKey: .isDefault)

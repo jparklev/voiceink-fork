@@ -93,7 +93,7 @@ struct VocabularyView: View {
                     .help("Sort alphabetically")
 
                     ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: .infinity), spacing: 12)], alignment: .leading, spacing: 12) {
+                        FlowLayout(spacing: 8) {
                             ForEach(sortedItems) { item in
                                 VocabularyWordView(item: item) {
                                     removeWord(item)
@@ -118,51 +118,12 @@ struct VocabularyView: View {
     private func addWords() {
         let input = newWord.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else { return }
-
-        let parts = input
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !parts.isEmpty else { return }
-
-        if parts.count == 1, let word = parts.first {
-            if vocabularyWords.contains(where: { $0.word.lowercased() == word.lowercased() }) {
-                alertMessage = "'\(word)' is already in the vocabulary"
-                showAlert = true
-                return
-            }
-            addWord(word)
-            newWord = ""
+        if let error = DictionaryService.addVocabularyWords(input, existing: Array(vocabularyWords), context: modelContext) {
+            alertMessage = error
+            showAlert = true
             return
-        }
-
-        for word in parts {
-            let lower = word.lowercased()
-            if !vocabularyWords.contains(where: { $0.word.lowercased() == lower }) {
-                addWord(word)
-            }
         }
         newWord = ""
-    }
-
-    private func addWord(_ word: String) {
-        let normalizedWord = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !vocabularyWords.contains(where: { $0.word.lowercased() == normalizedWord.lowercased() }) else {
-            return
-        }
-
-        let newWord = VocabularyWord(word: normalizedWord)
-        modelContext.insert(newWord)
-
-        do {
-            try modelContext.save()
-        } catch {
-            // Rollback the insert to maintain UI consistency
-            modelContext.delete(newWord)
-            alertMessage = "Failed to add word: \(error.localizedDescription)"
-            showAlert = true
-        }
     }
 
     private func removeWord(_ word: VocabularyWord) {
@@ -190,8 +151,6 @@ struct VocabularyWordView: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
                 .foregroundColor(.primary)
-
-            Spacer(minLength: 8)
 
             Button(action: onDelete) {
                 Image(systemName: "xmark.circle.fill")
