@@ -26,6 +26,8 @@ final class CoreAudioRecorder: @unchecked Sendable {
     // Conversion buffer
     private var conversionBuffer: UnsafeMutablePointer<Int16>?
     private var conversionBufferSize: UInt32 = 0
+    private var monoBuffer: UnsafeMutablePointer<Float32>?
+    private var resampler: MonoResampler?
 
     // Audio metering (thread-safe)
     private let meterLock = NSLock()
@@ -131,6 +133,10 @@ final class CoreAudioRecorder: @unchecked Sendable {
             conversionBuffer = nil
             conversionBufferSize = 0
         }
+
+        monoBuffer?.deallocate()
+        monoBuffer = nil
+        resampler = nil
 
         // Free render buffer
         if let buffer = renderBuffer {
@@ -251,12 +257,13 @@ final class CoreAudioRecorder: @unchecked Sendable {
         }
 
         // Reallocate conversion buffer if new sample rate requires more space
-        let maxOutputFrames = UInt32(Double(maxFrames) * (outputFormat.mSampleRate / newDeviceFormat.mSampleRate)) + 1
+        let maxOutputFrames = UInt32(Double(maxFrames) * (outputFormat.mSampleRate / newDeviceFormat.mSampleRate)) + 64
         if maxOutputFrames > conversionBufferSize {
             conversionBuffer?.deallocate()
             conversionBuffer = UnsafeMutablePointer<Int16>.allocate(capacity: Int(maxOutputFrames))
             conversionBufferSize = maxOutputFrames
         }
+        resampler = try MonoResampler(inputRate: newDeviceFormat.mSampleRate, outputRate: outputFormat.mSampleRate)
 
         // Update stored format
         deviceFormat = newDeviceFormat
@@ -435,10 +442,12 @@ final class CoreAudioRecorder: @unchecked Sendable {
         renderBuffer = UnsafeMutablePointer<Float32>.allocate(capacity: Int(bufferSamples))
         renderBufferSize = bufferSamples
 
-        // Pre-allocate conversion buffer (output is always smaller due to downsampling)
-        let maxOutputFrames = UInt32(Double(maxFrames) * (outputFormat.mSampleRate / deviceFormat.mSampleRate)) + 1
+        // Pre-allocate conversion buffer; the resampler can emit a few frames more than the exact ratio
+        let maxOutputFrames = UInt32(Double(maxFrames) * (outputFormat.mSampleRate / deviceFormat.mSampleRate)) + 64
         conversionBuffer = UnsafeMutablePointer<Int16>.allocate(capacity: Int(maxOutputFrames))
         conversionBufferSize = maxOutputFrames
+        monoBuffer = UnsafeMutablePointer<Float32>.allocate(capacity: Int(maxFrames))
+        resampler = try MonoResampler(inputRate: deviceFormat.mSampleRate, outputRate: outputFormat.mSampleRate)
     }
 
     private func setupInputCallback() throws {
@@ -632,62 +641,29 @@ final class CoreAudioRecorder: @unchecked Sendable {
         guard let file = audioFile else { return }
 
         let inputChannels = deviceFormat.mChannelsPerFrame
-        let inputSampleRate = deviceFormat.mSampleRate
-        let outputSampleRate = outputFormat.mSampleRate
 
         // Get input samples
         guard let inputData = inputBuffer.mBuffers.mData else { return }
         let inputSamples = inputData.assumingMemoryBound(to: Float32.self)
 
-        // Calculate output frame count after sample rate conversion
-        let ratio = outputSampleRate / inputSampleRate
-        let outputFrameCount = UInt32(Double(frameCount) * ratio)
+        guard let outputBuffer = conversionBuffer, let monoBuffer, let resampler else { return }
 
-        guard outputFrameCount > 0,
-              let outputBuffer = conversionBuffer,
-              outputFrameCount <= conversionBufferSize else { return }
-
-        // Convert Float32 multi-channel → Int16 mono (with sample rate conversion if needed)
-        if inputSampleRate == outputSampleRate {
-            // Direct conversion, just format change and channel mixing
+        // Mix channels to mono, then resample and convert to Int16
+        let mono: UnsafePointer<Float32>
+        if inputChannels == 1 {
+            mono = UnsafePointer(inputSamples)
+        } else {
             for i in 0..<Int(frameCount) {
                 var sample: Float32 = 0
-                // Mix all channels to mono
                 for ch in 0..<Int(inputChannels) {
                     sample += inputSamples[i * Int(inputChannels) + ch]
                 }
-                sample /= Float32(inputChannels)
-
-                // Convert to Int16 with clipping
-                let scaled = sample * 32767.0
-                let clipped = max(-32768.0, min(32767.0, scaled))
-                outputBuffer[i] = Int16(clipped)
+                monoBuffer[i] = sample / Float32(inputChannels)
             }
-        } else {
-            // Sample rate conversion needed - use linear interpolation
-            for i in 0..<Int(outputFrameCount) {
-                let inputIndex = Double(i) / ratio
-                let inputIndexInt = Int(inputIndex)
-                let frac = Float32(inputIndex - Double(inputIndexInt))
-
-                var sample: Float32 = 0
-                let idx1 = min(inputIndexInt, Int(frameCount) - 1)
-                let idx2 = min(inputIndexInt + 1, Int(frameCount) - 1)
-
-                // Mix channels and interpolate
-                for ch in 0..<Int(inputChannels) {
-                    let s1 = inputSamples[idx1 * Int(inputChannels) + ch]
-                    let s2 = inputSamples[idx2 * Int(inputChannels) + ch]
-                    sample += s1 + frac * (s2 - s1)
-                }
-                sample /= Float32(inputChannels)
-
-                // Convert to Int16
-                let scaled = sample * 32767.0
-                let clipped = max(-32768.0, min(32767.0, scaled))
-                outputBuffer[i] = Int16(clipped)
-            }
+            mono = UnsafePointer(monoBuffer)
         }
+        let outputFrameCount = resampler.process(mono, frames: frameCount, into: outputBuffer, capacity: conversionBufferSize)
+        guard outputFrameCount > 0 else { return }
 
         // Write to file
         var outputBufferList = AudioBufferList(
