@@ -5,11 +5,8 @@ struct TranscriptionOutputFilter {
     private static let lowercaseTranscriptionKey = "LowercaseTranscription"
     private static let apostropheLikeCharacters = CharacterSet(charactersIn: "'’‘ʼ＇")
     
-    private static let hallucinationPatterns = [
-        #"\[.*?\]"#,     // []
-        #"\(.*?\)"#,     // ()
-        #"\{.*?\}"#      // {}
-    ]
+    // Non-speech tags Whisper emits, e.g. [BLANK_AUDIO], (upbeat music), [ Silence ]. Other bracketed text is speech.
+    private static let nonSpeechTagPattern = #"[\[({]\s*(?:[\w-]+\s+){0,2}(?:blank_audio|music|applause|laugh\w*|silence|noise|inaudible|sound|static|clicking|typing|sighs?|coughs?|beeps?|crosstalk)\s*[\])}]"#
 
     static func filter(_ text: String) -> String {
         var filteredText = text
@@ -21,22 +18,24 @@ struct TranscriptionOutputFilter {
             filteredText = regex.stringByReplacingMatches(in: filteredText, options: [], range: range, withTemplate: "")
         }
 
-        // Remove bracketed hallucinations
-        for pattern in hallucinationPatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                let range = NSRange(filteredText.startIndex..., in: filteredText)
-                filteredText = regex.stringByReplacingMatches(in: filteredText, options: [], range: range, withTemplate: "")
-            }
-        }
+        filteredText = filteredText.replacingOccurrences(of: nonSpeechTagPattern, with: "", options: [.regularExpression, .caseInsensitive])
 
         // Remove filler words (if enabled)
         if FillerWordManager.shared.isEnabled {
             for fillerWord in FillerWordManager.shared.fillerWords {
                 let pattern = "\\b\(NSRegularExpression.escapedPattern(for: fillerWord))\\b[,.]?"
-                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                    let range = NSRange(filteredText.startIndex..., in: filteredText)
-                    filteredText = regex.stringByReplacingMatches(in: filteredText, options: [], range: range, withTemplate: "")
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+                let text = NSMutableString(string: filteredText)
+                for match in regex.matches(in: filteredText, range: NSRange(location: 0, length: text.length)).reversed() {
+                    let startedSentence = text.substring(with: match.range).first?.isUppercase == true
+                    text.deleteCharacters(in: match.range)
+                    // "Uh yeah." -> "Yeah.", not "yeah."
+                    let next = text.rangeOfCharacter(from: .letters, range: NSRange(location: match.range.location, length: text.length - match.range.location))
+                    if startedSentence, next.location != NSNotFound {
+                        text.replaceCharacters(in: next, with: text.substring(with: next).uppercased())
+                    }
                 }
+                filteredText = text as String
             }
         }
 
