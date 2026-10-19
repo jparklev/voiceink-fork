@@ -8,6 +8,9 @@ private let logger = Logger(subsystem: "com.VoiceInk", category: "CursorPaster")
 class CursorPaster {
     private typealias ClipboardSnapshot = [(NSPasteboard.PasteboardType, Data)]
 
+    // Replaced in tests.
+    static var isAccessibilityTrusted: () -> Bool = { AXIsProcessTrusted() }
+
     static func pasteAtCursor(_ text: String) {
         Task {
             await MainActor.run {
@@ -19,18 +22,32 @@ class CursorPaster {
     @MainActor
     @discardableResult
     static func startPasteAtCursor(_ text: String) -> Task<Void, Never> {
+        // Both paste methods need Accessibility; without it, leave the text on the clipboard and say so.
+        guard isAccessibilityTrusted() else {
+            logger.error("Accessibility not trusted — cannot paste")
+            _ = ClipboardManager.setClipboard(text)
+            return Task { @MainActor in
+                NotificationManager.shared.showNotification(
+                    title: "Copied to clipboard. Allow VoiceInk in Accessibility settings to paste.", type: .warning, duration: 8,
+                    actionButton: ("Open Settings", {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                    }))
+            }
+        }
+
         let pasteboard = NSPasteboard.general
         let shouldRestoreClipboard = UserDefaults.standard.bool(forKey: "restoreClipboardAfterPaste")
         let savedContents = shouldRestoreClipboard ? snapshotClipboard(from: pasteboard) : []
 
         _ = ClipboardManager.setClipboard(text, transient: shouldRestoreClipboard)
+        let ourChangeCount = pasteboard.changeCount
 
         return Task { @MainActor in
             try? await Task.sleep(nanoseconds: 50_000_000)
             postPasteCommand()
 
             if shouldRestoreClipboard {
-                scheduleClipboardRestore(savedContents, on: pasteboard)
+                scheduleClipboardRestore(savedContents, on: pasteboard, ifStill: ourChangeCount)
             }
         }
     }
@@ -63,12 +80,13 @@ class CursorPaster {
         }
     }
 
-    private static func scheduleClipboardRestore(_ savedContents: ClipboardSnapshot, on pasteboard: NSPasteboard) {
+    private static func scheduleClipboardRestore(_ savedContents: ClipboardSnapshot, on pasteboard: NSPasteboard, ifStill changeCount: Int) {
         let restoreDelay = UserDefaults.standard.double(forKey: "clipboardRestoreDelay")
         let delay = max(restoreDelay, 0.25)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            if !savedContents.isEmpty {
+            // Skip if the user copied something else since our paste.
+            if !savedContents.isEmpty, pasteboard.changeCount == changeCount {
                 pasteboard.clearContents()
                 for (type, data) in savedContents {
                     pasteboard.setData(data, forType: type)
@@ -110,11 +128,6 @@ class CursorPaster {
 
     // Posts Cmd+V via CGEvent without modifying the active input source.
     private static func pasteFromClipboard() {
-        guard AXIsProcessTrusted() else {
-            logger.error("Accessibility not trusted — cannot paste")
-            return
-        }
-
         let source = CGEventSource(stateID: .privateState)
 
         let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x37, keyDown: true)
