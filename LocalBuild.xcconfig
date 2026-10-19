@@ -13,3 +13,6 @@ PROVISIONING_PROFILE_SPECIFIER =
 
 // Add LOCAL_BUILD compilation flag so Swift code can use #if LOCAL_BUILD
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) LOCAL_BUILD
+
+// Ad-hoc signatures carry no Team ID, so the hardened runtime's library validation rejects the embedded frameworks
+ENABLE_HARDENED_RUNTIME = NO

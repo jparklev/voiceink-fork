@@ -3,8 +3,19 @@ DEPS_DIR := $(HOME)/VoiceInk-Dependencies
 WHISPER_CPP_DIR := $(DEPS_DIR)/whisper.cpp
 FRAMEWORK_PATH := $(WHISPER_CPP_DIR)/build-apple/whisper.xcframework
 LOCAL_DERIVED_DATA := $(CURDIR)/.local-build
+LOCAL_FLAGS = -derivedDataPath "$(LOCAL_DERIVED_DATA)" \
+		-xcconfig LocalBuild.xcconfig \
+		CODE_SIGN_IDENTITY="-" \
+		CODE_SIGNING_REQUIRED=NO \
+		CODE_SIGNING_ALLOWED=YES \
+		DEVELOPMENT_TEAM="" \
+		CODE_SIGN_ENTITLEMENTS=$(CURDIR)/VoiceInk/VoiceInk.local.entitlements \
+		SWIFT_ACTIVE_COMPILATION_CONDITIONS='$$(inherited) LOCAL_BUILD'
+# Ad-hoc signatures change every build, which revokes macOS permissions such as Accessibility.
+# Signing with a fixed self-signed identity keeps them; `make install` uses it when present.
+SIGN_ID ?= $(shell security find-certificate -c "VoiceInk Local" >/dev/null 2>&1 && echo "VoiceInk Local" || echo -)
 
-.PHONY: all clean whisper setup build local check healthcheck help dev run
+.PHONY: all clean whisper setup build local install check healthcheck help dev run
 
 # Default target
 all: check build
@@ -48,16 +59,7 @@ build: setup
 local: check setup
 	@echo "Building VoiceInk for local use (no Apple Developer certificate required)..."
 	@rm -rf "$(LOCAL_DERIVED_DATA)"
-	xcodebuild -project VoiceInk.xcodeproj -scheme VoiceInk -configuration Debug \
-		-derivedDataPath "$(LOCAL_DERIVED_DATA)" \
-		-xcconfig LocalBuild.xcconfig \
-		CODE_SIGN_IDENTITY="-" \
-		CODE_SIGNING_REQUIRED=NO \
-		CODE_SIGNING_ALLOWED=YES \
-		DEVELOPMENT_TEAM="" \
-		CODE_SIGN_ENTITLEMENTS=$(CURDIR)/VoiceInk/VoiceInk.local.entitlements \
-		SWIFT_ACTIVE_COMPILATION_CONDITIONS='$$(inherited) LOCAL_BUILD' \
-		build
+	xcodebuild -project VoiceInk.xcodeproj -scheme VoiceInk -configuration Debug $(LOCAL_FLAGS) build
 	@APP_PATH="$(LOCAL_DERIVED_DATA)/Build/Products/Debug/VoiceInk.app" && \
 	if [ -d "$$APP_PATH" ]; then \
 		echo "Copying VoiceInk.app to ~/Downloads..."; \
@@ -75,6 +77,15 @@ local: check setup
 		echo "Error: Could not find built VoiceInk.app at $$APP_PATH"; \
 		exit 1; \
 	fi
+
+# Release build installed to /Applications
+install: check setup
+	xcodebuild -project VoiceInk.xcodeproj -scheme VoiceInk -configuration Release $(LOCAL_FLAGS) build
+	codesign -f -s "$(SIGN_ID)" --preserve-metadata=entitlements,flags "$(LOCAL_DERIVED_DATA)/Build/Products/Release/VoiceInk.app"
+	-osascript -e 'tell application id "com.jparklev.VoiceInk" to quit' && sleep 2
+	rm -rf /Applications/VoiceInk.app
+	ditto "$(LOCAL_DERIVED_DATA)/Build/Products/Release/VoiceInk.app" /Applications/VoiceInk.app
+	open /Applications/VoiceInk.app
 
 # Run application
 run:
@@ -107,6 +118,7 @@ help:
 	@echo "  setup              Copy whisper XCFramework to VoiceInk project"
 	@echo "  build              Build the VoiceInk Xcode project"
 	@echo "  local              Build for local use (no Apple Developer certificate needed)"
+	@echo "  install            Build Release and install to /Applications"
 	@echo "  run                Launch the built VoiceInk app"
 	@echo "  dev                Build and run the app (for development)"
 	@echo "  all                Run full build process (default)"
