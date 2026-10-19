@@ -394,18 +394,14 @@ struct VoiceInkApp: App {
 }
 
 class UpdaterViewModel: ObservableObject {
-    @AppStorage("autoUpdateCheck") private var autoUpdateCheck = true
 
     private let updaterController: SPUStandardUpdaterController
 
     @Published var canCheckForUpdates = false
 
     init() {
-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-
-        // Enable automatic update checking
-        updaterController.updater.automaticallyChecksForUpdates = autoUpdateCheck
-        updaterController.updater.updateCheckInterval = 24 * 60 * 60
+        // Not started: SUFeedURL is upstream's appcast, which would offer to replace this fork with upstream VoiceInk.
+        updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
 
         updaterController.updater.publisher(for: \.canCheckForUpdates)
             .assign(to: &$canCheckForUpdates)
