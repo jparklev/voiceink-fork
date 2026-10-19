@@ -35,112 +35,52 @@ class AudioProcessor {
     }
     
     func processAudioToSamples(_ url: URL) async throws -> [Float] {
-        guard let audioFile = try? AVAudioFile(forReading: url) else {
+        try Self.samples16kMono(from: url)
+    }
+
+    /// Decodes any file AVAudioFile can read into 16 kHz mono Float32 samples.
+    static func samples16kMono(from url: URL) throws -> [Float] {
+        guard let file = try? AVAudioFile(forReading: url) else {
             throw AudioProcessingError.invalidAudioFile
         }
-        
-        let format = audioFile.processingFormat
-        let sampleRate = format.sampleRate
-        let channels = format.channelCount
-        let totalFrames = audioFile.length
-        
-        let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: AudioFormat.targetSampleRate,
-            channels: AudioFormat.targetChannels,
-            interleaved: false
-        )
-        
-        guard let outputFormat = outputFormat else {
+        guard let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: AudioFormat.targetSampleRate,
+                                               channels: AudioFormat.targetChannels, interleaved: false),
+              let converter = AVAudioConverter(from: file.processingFormat, to: outputFormat) else {
             throw AudioProcessingError.unsupportedFormat
         }
-        
-        let chunkSize: AVAudioFrameCount = 50_000_000
-        var allSamples: [Float] = []
-        var currentFrame: AVAudioFramePosition = 0
-        
-        while currentFrame < totalFrames {
-            let remainingFrames = totalFrames - currentFrame
-            let framesToRead = min(chunkSize, AVAudioFrameCount(remainingFrames))
-            
-            guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesToRead) else {
-                throw AudioProcessingError.conversionFailed
-            }
-            
-            audioFile.framePosition = currentFrame
-            try audioFile.read(into: inputBuffer, frameCount: framesToRead)
-            
-            if sampleRate == AudioFormat.targetSampleRate && channels == AudioFormat.targetChannels {
-                let chunkSamples = convertToWhisperFormat(inputBuffer)
-                allSamples.append(contentsOf: chunkSamples)
-            } else {
-                guard let converter = AVAudioConverter(from: format, to: outputFormat) else {
-                    throw AudioProcessingError.conversionFailed
-                }
-                
-                let ratio = AudioFormat.targetSampleRate / sampleRate
-                let outputFrameCount = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio)
-                
-                guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCount) else {
-                    throw AudioProcessingError.conversionFailed
-                }
-                
-                var error: NSError?
-                let status = converter.convert(
-                    to: outputBuffer,
-                    error: &error,
-                    withInputFrom: { inNumPackets, outStatus in
-                        outStatus.pointee = .haveData
-                        return inputBuffer
-                    }
-                )
-                
-                if let error = error {
-                    throw AudioProcessingError.conversionFailed
-                }
-                
-                if status == .error {
-                    throw AudioProcessingError.conversionFailed
-                }
-                
-                let chunkSamples = convertToWhisperFormat(outputBuffer)
-                allSamples.append(contentsOf: chunkSamples)
-            }
-            
-            currentFrame += AVAudioFramePosition(framesToRead)
+        converter.downmix = true
+
+        let chunk: AVAudioFrameCount = 65_536
+        guard let input = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: chunk),
+              let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: chunk) else {
+            throw AudioProcessingError.conversionFailed
         }
-        
-        return allSamples
+
+        var samples: [Float] = []
+        samples.reserveCapacity(Int(Double(file.length) * AudioFormat.targetSampleRate / file.processingFormat.sampleRate))
+        var readError: Error?
+        while true {
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, inputStatus in
+                do {
+                    guard file.framePosition < file.length else { throw CocoaError(.fileReadUnknown) }
+                    try file.read(into: input, frameCount: chunk)
+                    inputStatus.pointee = .haveData
+                    return input
+                } catch {
+                    if file.framePosition < file.length { readError = error }
+                    inputStatus.pointee = .endOfStream
+                    return nil
+                }
+            }
+            if error != nil || readError != nil || status == .error {
+                throw AudioProcessingError.sampleExtractionFailed
+            }
+            samples.append(contentsOf: UnsafeBufferPointer(start: output.floatChannelData![0], count: Int(output.frameLength)))
+            if status == .endOfStream { return samples }
+        }
     }
-    
-    private func convertToWhisperFormat(_ buffer: AVAudioPCMBuffer) -> [Float] {
-        guard let channelData = buffer.floatChannelData else {
-            return []
-        }
-        
-        let channelCount = Int(buffer.format.channelCount)
-        let frameLength = Int(buffer.frameLength)
-        var samples = Array(repeating: Float(0), count: frameLength)
-        
-        if channelCount == 1 {
-            samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-        } else {
-            for frame in 0..<frameLength {
-                var sum: Float = 0
-                for channel in 0..<channelCount {
-                    sum += channelData[channel][frame]
-                }
-                samples[frame] = sum / Float(channelCount)
-            }
-        }
-        
-        let maxSample = samples.map(abs).max() ?? 1
-        if maxSample > 0 {
-            samples = samples.map { $0 / maxSample }
-        }
-        
-        return samples
-    }
+
     func saveSamplesAsWav(samples: [Float], to url: URL) throws {
         let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
