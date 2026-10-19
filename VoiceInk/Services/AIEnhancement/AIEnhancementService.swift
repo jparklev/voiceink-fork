@@ -387,7 +387,7 @@ class AIEnhancementService: ObservableObject {
     }
 
     func captureScreenContext() async {
-        guard CGPreflightScreenCaptureAccess() else {
+        guard useScreenCaptureContext, CGPreflightScreenCaptureAccess() else {
             return
         }
 

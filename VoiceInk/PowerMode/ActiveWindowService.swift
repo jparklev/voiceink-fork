@@ -40,7 +40,9 @@ class ActiveWindowService: ObservableObject {
 
         var configToApply: PowerModeConfig?
 
-        if let browserType = BrowserType.allCases.first(where: { $0.bundleIdentifier == bundleIdentifier }) {
+        // Reading the URL spawns osascript, so skip it unless an enabled Power Mode matches on URLs.
+        let hasURLRules = PowerModeManager.shared.configurations.contains { $0.isEnabled && !($0.urlConfigs ?? []).isEmpty }
+        if hasURLRules, let browserType = BrowserType.allCases.first(where: { $0.bundleIdentifier == bundleIdentifier }) {
             do {
                 let currentURL = try await browserURLService.getCurrentURL(from: browserType)
                 if let config = PowerModeManager.shared.getConfigurationForURL(currentURL) {
