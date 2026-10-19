@@ -56,16 +56,16 @@ actor WhisperContext {
             params.initial_prompt = nil
         }
         
-        params.print_realtime = true
+        params.print_realtime = false
         params.print_progress = false
-        params.print_timestamps = true
+        params.print_timestamps = false
         params.print_special = false
         params.translate = false
         params.n_threads = Int32(maxThreads)
         params.offset_ms = 0
         params.no_context = true
         params.single_segment = false
-        params.temperature = 0.2
+        params.temperature = 0 // > 0 makes greedy decoding sample best_of = 5 decoders; fallback still raises it
 
         whisper_reset_timings(context)
         
