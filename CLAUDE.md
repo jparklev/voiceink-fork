@@ -37,16 +37,12 @@ uv run validate_recording.py --skip-launch
 
 ## Architecture Notes
 
-### Audio Engine (Output-First Warmup)
+### Audio Capture
 
-The recording system uses a pre-warmed `AVAudioEngine` for fast startup:
-
-1. **App launch**: Engine starts with output-only graph (no mic indicator)
-2. **Recording start**: Input tap attached, mic indicator appears
-3. **Recording stop**: Engine destroyed and recreated output-only (clears mic indicator)
-
-Key insight: Once `engine.inputNode` is accessed, that engine instance is "tainted" - the mic indicator persists even after removing the tap. Must destroy and recreate the engine to clear it.
+`CoreAudioRecorder` drives an AUHAL input unit. Each recording creates a new unit and disposes it on stop, which clears the mic indicator. The render callback mixes to mono, then `MonoResampler` (an `AudioConverter`) filters and resamples to 16 kHz Int16. The output goes to the WAV file and to `onAudioChunk` for streaming.
 
 Key files:
-- `VoiceInk/AudioEngineRecorder.swift` - Core engine management
+- `VoiceInk/CoreAudioRecorder.swift` - AUHAL unit, render callback, file writing
+- `VoiceInk/MonoResampler.swift` - sample-rate conversion
 - `VoiceInk/Recorder.swift` - High-level recording interface
+- `VoiceInk/Transcription/Engine/AudioFileProcessor.swift` - `AudioProcessor.samples16kMono` decodes any audio file for local models
