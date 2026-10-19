@@ -155,6 +155,7 @@ class RecorderUIManager: ObservableObject {
         guard let engine = engine, let recorder = recorder else { return }
         logger.notice("Resetting recording state on launch")
         await recorder.stopRecording()
+        MediaController.shared.restoreMuteAfterCrash()
         hideRecorderPanel()
         await MainActor.run {
             isMiniRecorderVisible = false

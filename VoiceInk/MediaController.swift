@@ -5,7 +5,11 @@ final class MediaController: ObservableObject {
 
     static let shared = MediaController()
 
-    private var didMuteAudio = false
+    // Persisted so a crash mid-recording can't leave the Mac muted; see restoreMuteAfterCrash().
+    private var didMuteAudio: Bool {
+        get { UserDefaults.standard.bool(forKey: "didMuteSystemAudio") }
+        set { UserDefaults.standard.set(newValue, forKey: "didMuteSystemAudio") }
+    }
     private var wasAudioMutedBeforeRecording = false
     private var unmuteTask: Task<Void, Never>?
     private var muteGeneration: Int = 0
@@ -19,6 +23,12 @@ final class MediaController: ObservableObject {
     }
 
     private init() {}
+
+    func restoreMuteAfterCrash() {
+        guard didMuteAudio else { return }
+        _ = setSystemMuted(false)
+        didMuteAudio = false
+    }
 
     func muteSystemAudio() async -> Bool {
         guard isSystemMuteEnabled else { return false }
