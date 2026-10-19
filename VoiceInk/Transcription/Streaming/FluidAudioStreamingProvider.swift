@@ -219,7 +219,8 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
         var samples = Array(audioBuffer[bufferRelativeSeek...])
         bufferLock.unlock()
 
-        guard samples.count >= Int(sampleRate) else { return nil }
+        // A short tail is often the last word; the silence padding below lifts it over the model's 1 s minimum.
+        guard samples.count >= Int(sampleRate / 10) else { return nil }
 
         let trailingSilenceSamples = 16_000
         let maxSingleChunkSamples = 240_000
